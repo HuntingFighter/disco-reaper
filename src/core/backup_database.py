@@ -656,7 +656,7 @@ class BackupDatabase:
                 query += " AND id > ?"
                 params.append(str(after_id))
             
-            query += " ORDER BY id ASC LIMIT ? OFFSET ?"
+            query += " ORDER BY timestamp ASC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
             rows = self._conn.execute(query, params).fetchall()
