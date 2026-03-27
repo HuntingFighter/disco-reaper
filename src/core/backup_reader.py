@@ -1347,15 +1347,16 @@ class BackupReader:
         
         return bm
 
-    async def get_message(self, channel_id: int, message_id: int) -> BackupMessage | None:
+    async def get_message(self, channel_id: int, message_timestamp: datetime) -> BackupMessage | None:
         """Fetch a specific message from SQLite."""
         if not self.db: return None
         import sqlite3
         conn = sqlite3.connect(self.db.db_path)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM messages WHERE id = ?", (str(message_id),)).fetchone()
+        row = conn.execute("SELECT * FROM messages WHERE timestamp = ?", (str(message_timestamp),)).fetchone()
         if row:
             data = dict(row)
+            message_id = data.get("message_id")
             # Fetch attachments
             atts = conn.execute("SELECT * FROM attachments WHERE message_id = ?", (str(message_id),)).fetchall()
             data["attachments"] = [dict(a) for a in atts]
@@ -1381,7 +1382,7 @@ class BackupReader:
         self,
         channel_id: int,
         limit: int = None,
-        after_id: int = None,
+        after_timestamp: datetime = None,
         inclusive: bool = False
     ) -> AsyncGenerator["BackupMessage", None]:
         """Yields BackupMessages from SQLite, respecting after_id and limit."""
@@ -1402,7 +1403,7 @@ class BackupReader:
                 str(channel_id), 
                 limit=actual_limit, 
                 offset=offset, 
-                after_id=str(after_id) if after_id else None
+                after_timestamp=str(after_timestamp) if after_timestamp else None
             )
             
             if not msgs:

@@ -2,6 +2,7 @@ import sqlite3
 import logging
 import json
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
@@ -467,8 +468,8 @@ class BackupDatabase:
             
             conn.commit()
 
-    def get_last_message_id(self, channel_id: str) -> Optional[str]:
-        with self._lock:
+    def get_last_message_timestamp(self, channel_id: str) -> Optional[datetime]:
+        with (self._lock):
             row = self._conn.execute("SELECT id FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT 1", (str(channel_id),)).fetchone()
             return row["id"] if row else None
 
@@ -647,14 +648,14 @@ class BackupDatabase:
             rows = self._conn.execute("SELECT * FROM media_pool").fetchall()
             return {r["hash"]: dict(r) for r in rows}
 
-    def get_messages_paged(self, channel_id: str, limit: int = 100, offset: int = 0, after_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_messages_paged(self, channel_id: str, limit: int = 100, offset: int = 0, after_timestamp: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._lock:
             query = "SELECT * FROM messages WHERE channel_id = ?"
             params = [str(channel_id)]
             
-            if after_id:
-                query += " AND id > ?"
-                params.append(str(after_id))
+            if after_timestamp:
+                query += " AND timestamp > ?"
+                params.append(str(after_timestamp))
             
             query += " ORDER BY timestamp ASC LIMIT ? OFFSET ?"
             params.extend([limit, offset])

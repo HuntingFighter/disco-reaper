@@ -689,7 +689,7 @@ class ChannelPickerScreen(Screen[tuple]):
             
             src_val = None
             tgt_val = None
-            
+
             if src_list.highlighted is not None:
                 opt = src_list.get_option_at_index(src_list.highlighted)
                 if opt.id and opt.id.startswith("src_"):
@@ -699,11 +699,11 @@ class ChannelPickerScreen(Screen[tuple]):
                 opt = tgt_list.get_option_at_index(tgt_list.highlighted)
                 if opt.id and opt.id.startswith("tgt_"):
                     tgt_val = opt.id.split("_", 1)[1]
-            
+
             if not src_val or not tgt_val:
                 self.notify("Please select one channel from both lists.", severity="warning")
                 return
-            
+
             # Handle "Extras" options by pushing sub-modals on top of this screen
             if tgt_val == "create_new":
                 # Get source channel name for default
@@ -720,7 +720,6 @@ class ChannelPickerScreen(Screen[tuple]):
                 
                 self.app.push_screen(ChannelNameInputModal(default_name=src_name), on_name_result)
                 return
-            
             elif tgt_val == "enter_id":
                 def on_chan_result(chan_dict):
                     if chan_dict:

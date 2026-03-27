@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -207,14 +208,14 @@ class MigrationState:
         if self._ensure_db():
             self.db.update_channel_tracking(str(target_channel_id), last_msg_id=str(message_id))
         
-    def get_last_message_id(self, target_channel_id: str) -> str | None:
+    def get_last_message_timestamp(self, target_channel_id: str) -> datetime | None:
         if self._ensure_db():
-            return self.db.get_channel_tracking(str(target_channel_id)).get("last_msg_id")
+            return self.db.get_channel_tracking(str(target_channel_id)).get("last_msg_ts")
         return None
 
-    def get_thread_last_message_id(self, target_channel_id: str, thread_id: str) -> str | None:
+    def get_thread_last_message_timestamp(self, target_channel_id: str, thread_id: str) -> datetime | None:
         if self._ensure_db():
-            return self.db.get_thread_tracking(str(target_channel_id), str(thread_id)).get("last_msg_id")
+            return self.db.get_thread_tracking(str(target_channel_id), str(thread_id)).get("timestamp")
         return None
 
     def find_message_mapping(self, discord_id: str) -> tuple[str, str] | tuple[None, None]:

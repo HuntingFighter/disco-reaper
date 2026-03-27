@@ -3,6 +3,8 @@ import json
 import logging
 import asyncio
 import hashlib
+from datetime import datetime
+
 import discord
 from pathlib import Path
 from typing import Dict, Any, List, Optional, AsyncGenerator
@@ -335,7 +337,7 @@ class DiscordExporter:
         
         return data, ch_permissions, ch_forum_tags
 
-    async def export_channel_messages(self, channel_id: int, progress_callback=None, force=False, accumulated_count=0, accumulated_threads=0, accumulated_files=0, after_id: int | None = None):
+    async def export_channel_messages(self, channel_id: int, progress_callback=None, force=False, accumulated_count=0, accumulated_threads=0, accumulated_files=0, after_timestamp: datetime | None = None):
         """Fetches and saves message history for a channel to SQLite, handling incremental sync."""
         channel = await self.reader.get_channel(channel_id)
         if not channel:
@@ -347,12 +349,12 @@ class DiscordExporter:
         is_forum = isinstance(channel, discord.ForumChannel)
 
         # 1. Determine incremental sync point
-        last_id = after_id
-        if not force and last_id is None and self.db:
-            stored_last_id = self.db.get_last_message_id(channel_id)
-            if stored_last_id:
-                last_id = int(stored_last_id)
-                logger.info(f"Incremental sync for {channel_name}: starting after {last_id}")
+        last_timestamp = after_timestamp
+        if not force and last_timestamp is None and self.db:
+            stored_last_timestamp = self.db.get_last_message_timestamp(str(channel_id))
+            if stored_last_timestamp:
+                last_timestamp = int(stored_last_timestamp)
+                logger.info(f"Incremental sync for {channel_name}: starting after {last_timestamp}")
 
         new_count = 0
         BATCH_SIZE = 100
@@ -364,7 +366,7 @@ class DiscordExporter:
 
         try:
             batch_raw = []
-            async for msg in self.reader.fetch_message_history(channel_id, after_id=last_id):
+            async for msg in self.reader.fetch_message_history(channel_id, after_timestamp=last_timestamp):
                 if not self.is_running: break
                 batch_raw.append(msg)
 
@@ -705,7 +707,7 @@ class DiscordExporter:
                 except: pass
         return None
 
-    async def export_threads(self, channel_id: int, progress_callback=None, force=False, accumulated_count=0, accumulated_threads=0, accumulated_files=0, after_id: int | None = None):
+    async def export_threads(self, channel_id: int, progress_callback=None, force=False, accumulated_count=0, accumulated_threads=0, accumulated_files=0, after_timestamp: datetime | None = None):
         """Exports active and archived threads for a channel to SQLite."""
         channel = await self.reader.get_channel(channel_id)
         if not hasattr(channel, "threads") and not hasattr(channel, "archived_threads"):
@@ -807,7 +809,7 @@ class DiscordExporter:
                     accumulated_count=0,
                     accumulated_threads=0,
                     accumulated_files=0,
-                    after_id=after_id
+                    after_timestamp=after_timestamp
                 )
                 return cnt, thr, fls
 

@@ -1104,7 +1104,7 @@ class OperationPane(Container):
                     last_migrated = None
                     has_previous = False
                 else:
-                    last_migrated = self.engine.state.get_last_message_id(str(target_channel.get('id')))
+                    last_migrated = self.engine.state.get_last_message_timestamp(target_channel.get('id'))
                     has_previous = bool(last_migrated)
                 
                 # Analyze
@@ -1153,7 +1153,7 @@ class OperationPane(Container):
                 analysis_task = asyncio.create_task(migrate_mod.analyze_migration(
                     self.engine,
                     source_channel_id=source_channel.id,
-                    after_message_id=int(last_migrated) if last_migrated else None,
+                    after_message_timestamp=last_migrated if last_migrated else None,
                     progress_callback=update_scan,
                 ))
 
@@ -1163,7 +1163,7 @@ class OperationPane(Container):
                         first_msg_task = asyncio.create_task(self.engine.discord_reader.get_first_message(source_channel.id))
                         prev_msg_task = None
                         if has_previous and last_migrated:
-                            prev_msg_task = asyncio.create_task(self.engine.discord_reader.get_message(source_channel.id, int(last_migrated)))
+                            prev_msg_task = asyncio.create_task(self.engine.discord_reader.get_message(source_channel.id, last_migrated))
                         
                         first_msg = await first_msg_task
                         if first_msg:
@@ -1248,10 +1248,10 @@ class OperationPane(Container):
                     await self.engine.close_connections()
                     return
                     
-                after_id = None
+                after_timestamp = None
                 if choice == "btn_continue" and last_migrated:
                     logger.info("Proceeding with 'Continue Migration' (incremental sink).")
-                    after_id = int(last_migrated)
+                    after_timestamp = last_migrated
                 elif choice == "btn_start_id":
                     loop = asyncio.get_running_loop()
                     future = loop.create_future()
@@ -1269,10 +1269,10 @@ class OperationPane(Container):
                         continue
                         
                     logger.info(f"Proceeding with 'Start from ID': {verified_id}")
-                    after_id = verified_id
+                    after_timestamp = verified_id
                 else:
                     logger.info("Proceeding with 'Start from First' (clean sink).")
-                    after_id = None
+                    after_timestamp = None
                     # Clear previous tracking data for this channel
                     self.engine.state.clear_channel_data(target_channel.get("id"))
                 
@@ -1280,15 +1280,15 @@ class OperationPane(Container):
                 
                 # If after_id changed from the initial analysis, we must re-analyze 
                 # to get the correct total count for the UI fraction (e.g. Messages: 8/8 instead of 8/1)
-                initial_after = int(last_migrated) if last_migrated else None
+                initial_after = last_migrated if last_migrated else None
 
                 # User selected a different start point, transition UI immediately
-                if after_id != initial_after:
+                if after_timestamp != initial_after:
                     modal.phase_progress() # Hide buttons immediately
                     if choice == "btn_start_first":
                         modal.set_status("Starting from first message...")
                     elif choice == "btn_start_id":
-                        modal.set_status(f"Starting from ID [cyan]{after_id}[/cyan]...")
+                        modal.set_status(f"Starting from ID [cyan]{after_timestamp}[/cyan]...")
                     else:
                         modal.set_status("Re-analyzing channel from new starting point...")
 
@@ -1297,7 +1297,7 @@ class OperationPane(Container):
                         stats_analysis = await migrate_mod.analyze_migration(
                             self.engine,
                             source_channel_id=source_channel.id,
-                            after_message_id=after_id,
+                            after_message_timestamp=after_timestamp,
                             inclusive=is_inclusive,
                             progress_callback=update_scan,
                         )
@@ -1374,7 +1374,7 @@ class OperationPane(Container):
                 self.engine,
                 source_channel_id=source_channel.id,
                 target_channel_id=target_channel.get("id"),
-                after_message_id=after_id,
+                after_message_timestamp=after_timestamp,
                 inclusive=is_inclusive,
                 progress_callback=update_msg,
             )
