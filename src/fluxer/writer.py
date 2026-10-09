@@ -1,10 +1,31 @@
 import asyncio
 import io
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Awaitable, Callable
+import aiohttp
 from fluxer import Bot, Webhook, Forbidden, File
 
 logger = logging.getLogger(__name__)
+
+# fluxer.py retries JSON 429s itself, but a 429 with a non-JSON body (e.g. text/plain
+# from a proxy) surfaces as aiohttp.ContentTypeError after only a few short retries.
+# FluxerWriter retries those calls on top, honouring Retry-After when present.
+RATE_LIMIT_MAX_RETRIES = 6
+RATE_LIMIT_MAX_WAIT = 60.0
+RATE_LIMIT_BASE_WAIT = 5.0
+
+
+def _unparsed_rate_limit_wait(exc: BaseException, attempt: int) -> Optional[float]:
+    """Seconds to wait if exc is a 429 that fluxer.py could not handle, else None."""
+    if not isinstance(exc, aiohttp.ClientResponseError) or exc.status != 429:
+        return None
+    headers = exc.headers or {}
+    for name in ("Retry-After", "X-RateLimit-Reset-After"):
+        try:
+            return min(max(float(headers.get(name)), 0.0), RATE_LIMIT_MAX_WAIT)
+        except (TypeError, ValueError):
+            continue
+    return min(RATE_LIMIT_BASE_WAIT * (2 ** attempt), RATE_LIMIT_MAX_WAIT)
 
 class FluxerWriter:
     def __init__(self, token: str, community_id: str, api_url: str = "default"):
@@ -48,7 +69,9 @@ class FluxerWriter:
         assert self.client is not None
         try:
             # 1. Try to find existing webhook named "ReapersWebhook"
-            webhooks_data = await self.client.get_channel_webhooks(channel_id)
+            webhooks_data = await self._retry_on_rate_limit(
+                lambda: self.client.get_channel_webhooks(channel_id), f"list webhooks {channel_id}"
+            )
             for w_data in webhooks_data:
                 if w_data.get("name") == "ReapersWebhook":
                     w = Webhook.from_data(w_data, self.client)
@@ -56,7 +79,9 @@ class FluxerWriter:
                     return w
             
             # 2. Create new one if not found
-            w_data = await self.client.create_webhook(channel_id, name="ReapersWebhook")
+            w_data = await self._retry_on_rate_limit(
+                lambda: self.client.create_webhook(channel_id, name="ReapersWebhook"), f"create webhook {channel_id}"
+            )
             w = Webhook.from_data(w_data, self.client)
             self._webhooks[channel_id] = w
             return w
@@ -97,6 +122,27 @@ class FluxerWriter:
     def client(self):
         """Helper to access the underlying HTTP client."""
         return self.bot._http if self.bot else None
+
+    async def _retry_on_rate_limit(self, make_call: Callable[[], Awaitable[Any]], action: str) -> Any:
+        """
+        Runs make_call() and retries it when Fluxer answers with a 429 that fluxer.py
+        could not parse. make_call must build a fresh request each time (e.g. new
+        file buffers). A 429 means the request was not processed, so retrying is safe.
+        """
+        attempt = 0
+        while True:
+            try:
+                return await make_call()
+            except aiohttp.ClientResponseError as e:
+                wait = _unparsed_rate_limit_wait(e, attempt)
+                if wait is None or attempt >= RATE_LIMIT_MAX_RETRIES:
+                    raise
+                attempt += 1
+                logger.warning(
+                    f"Fluxer: Rate limited (unparsed 429) on {action}, "
+                    f"retrying in {wait:.1f}s (attempt {attempt}/{RATE_LIMIT_MAX_RETRIES})"
+                )
+                await asyncio.sleep(wait)
 
     async def validate(self) -> dict:
         """Validates the token, community ID, and permissions."""
@@ -192,15 +238,18 @@ class FluxerWriter:
         
         logger.debug(f"Fluxer: Creating channel {name} (type {type}) with topic='{topic}', nsfw={nsfw}, slowmode={slowmode_delay}, position={position}")
         
-        guild_channel = await self.client.create_guild_channel(
-            guild_id=self.community_id,
-            name=name,
-            type=type,
-            topic=topic or None,
-            parent_id=parent_id,
-            nsfw=nsfw,
-            rate_limit_per_user=slowmode_delay,
-            position=position
+        guild_channel = await self._retry_on_rate_limit(
+            lambda: self.client.create_guild_channel(
+                guild_id=self.community_id,
+                name=name,
+                type=type,
+                topic=topic or None,
+                parent_id=parent_id,
+                nsfw=nsfw,
+                rate_limit_per_user=slowmode_delay,
+                position=position
+            ),
+            f"create channel {name}"
         )
         self._channels_cache = None
         return str(guild_channel["id"])
@@ -214,14 +263,17 @@ class FluxerWriter:
         logger.debug(f"Fluxer: Modifying channel {channel_id}: name={name}, topic='{topic}', parent_id={parent_id}, nsfw={nsfw}, slowmode={slowmode_delay}, position={position}")
         
         try:
-            await self.client.modify_channel(
-                channel_id=channel_id,
-                name=name,
-                topic=topic,
-                parent_id=parent_id,
-                nsfw=nsfw,
-                rate_limit_per_user=slowmode_delay,
-                position=position
+            await self._retry_on_rate_limit(
+                lambda: self.client.modify_channel(
+                    channel_id=channel_id,
+                    name=name,
+                    topic=topic,
+                    parent_id=parent_id,
+                    nsfw=nsfw,
+                    rate_limit_per_user=slowmode_delay,
+                    position=position
+                ),
+                f"modify channel {channel_id}"
             )
         except Forbidden as e:
             if getattr(e, 'code', None) == "NSFW_CONTENT_AGE_RESTRICTED":
@@ -241,7 +293,9 @@ class FluxerWriter:
         if self._channels_cache is not None:
             return self._channels_cache
         assert self.client is not None
-        self._channels_cache = await self.client.get_guild_channels(self.community_id)
+        self._channels_cache = await self._retry_on_rate_limit(
+            lambda: self.client.get_guild_channels(self.community_id), "list channels"
+        )
         return self._channels_cache
 
     async def send_message(self, channel_id: str, author_name: str, content: str, timestamp: int, author_avatar_url: Optional[str] = None, files: Optional[List[Dict[str, Any]]] = None, reply_to_message_id: Optional[str] = None, is_forwarded: bool = False, embeds: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
@@ -280,10 +334,9 @@ class FluxerWriter:
         final_content = prefix + display_content if display_content else prefix
         logger.debug(f"Fluxer: Prepared final_content (len {len(final_content)}): {final_content!r}")
 
-        # Convert files to fluxer.File objects
-        fluxer_files = None
-        if files:
-            fluxer_files = [File(io.BytesIO(f["data"]), filename=f["filename"]) for f in files]
+        # Convert files to fluxer.File objects. Built per attempt: a consumed buffer can't be re-sent.
+        def make_files():
+            return [File(io.BytesIO(f["data"]), filename=f["filename"]) for f in files] if files else None
 
         # Normalize embeds (ensure they are dicts, handling fluxer.Embed objects or dicts)
         normalized_embeds = None
@@ -310,16 +363,19 @@ class FluxerWriter:
             if webhook and not reply_to_message_id:
                 logger.debug(f"Fluxer: Sending message via webhook {webhook.id} for user '{author_name}'")
                 try:
-                    msg = await asyncio.wait_for(
-                        webhook.send(
-                            content=final_content,
-                            username=f"{author_name} (discord)",
-                            avatar_url=author_avatar_url,
-                            files=fluxer_files,
-                            embeds=normalized_embeds,
-                            wait=True
+                    msg = await self._retry_on_rate_limit(
+                        lambda: asyncio.wait_for(
+                            webhook.send(
+                                content=final_content,
+                                username=f"{author_name} (discord)",
+                                avatar_url=author_avatar_url,
+                                files=make_files(),
+                                embeds=normalized_embeds,
+                                wait=True
+                            ),
+                            timeout=45.0 # Increased timeout for potential large file uploads
                         ),
-                        timeout=45.0 # Increased timeout for potential large file uploads
+                        f"webhook send in channel {channel_id}"
                     )
                     logger.debug(f"Fluxer: Webhook send complete, msg_id={msg.id if msg else 'None'}")
                     return str(msg.id) if msg else None
@@ -348,14 +404,15 @@ class FluxerWriter:
                         "content": final_bot_content,
                         "embeds": normalized_embeds
                     }
-                    if fluxer_files:
-                        kwargs["files"] = fluxer_files
                     if message_reference:
                         kwargs["message_reference"] = message_reference
 
-                    msg_data = await asyncio.wait_for(
-                        self.client.send_message(**kwargs),
-                        timeout=45.0
+                    msg_data = await self._retry_on_rate_limit(
+                        lambda: asyncio.wait_for(
+                            self.client.send_message(**kwargs, **({"files": make_files()} if files else {})),
+                            timeout=45.0
+                        ),
+                        f"bot send in channel {channel_id}"
                     )
                     logger.debug(f"Fluxer: Bot send complete, msg_id={msg_data.get('id') if msg_data else 'None'}")
                     return str(msg_data["id"]) if msg_data else None
@@ -376,10 +433,10 @@ class FluxerWriter:
         """
         assert self.client is not None
         
-        fluxer_files = None
-        if files:
-            fluxer_files = [f if hasattr(f, "filename") else File(io.BytesIO(f["data"]), filename=f["filename"]) for f in files]
-        
+        def make_files():
+            # dict entries get fresh buffers per attempt; ready-made File objects are passed through as-is
+            return [f if hasattr(f, "filename") else File(io.BytesIO(f["data"]), filename=f["filename"]) for f in files] if files else None
+
         message_reference = None
         if reply_to_message_id:
             message_reference = {"message_id": str(reply_to_message_id), "channel_id": str(channel_id)}
@@ -389,12 +446,13 @@ class FluxerWriter:
                 "channel_id": channel_id,
                 "content": content
             }
-            if fluxer_files:
-                kwargs["files"] = fluxer_files
             if message_reference:
                 kwargs["message_reference"] = message_reference
 
-            msg_data = await self.client.send_message(**kwargs)
+            msg_data = await self._retry_on_rate_limit(
+                lambda: self.client.send_message(**kwargs, **({"files": make_files()} if files else {})),
+                f"marker send in channel {channel_id}"
+            )
             return str(msg_data["id"]) if msg_data else None
         except Exception as e:
             print(f"Failed to send marker: {e}")
@@ -409,14 +467,17 @@ class FluxerWriter:
         assert self.client is not None
         
         try:
-            role = await self.client.create_guild_role(
-                guild_id=self.community_id,
-                name=name,
-                color=color,
-                hoist=hoist,
-                mentionable=mentionable,
-                permissions=permissions,
-                position=position
+            role = await self._retry_on_rate_limit(
+                lambda: self.client.create_guild_role(
+                    guild_id=self.community_id,
+                    name=name,
+                    color=color,
+                    hoist=hoist,
+                    mentionable=mentionable,
+                    permissions=permissions,
+                    position=position
+                ),
+                f"create role {name}"
             )
             return str(role["id"])
         except Exception as e:
@@ -431,10 +492,13 @@ class FluxerWriter:
         assert self.client is not None
         
         try:
-            emoji = await self.client.create_guild_emoji(
-                guild_id=self.community_id,
-                name=name,
-                image=image_bytes
+            emoji = await self._retry_on_rate_limit(
+                lambda: self.client.create_guild_emoji(
+                    guild_id=self.community_id,
+                    name=name,
+                    image=image_bytes
+                ),
+                f"create emoji {name}"
             )
             return str(emoji["id"])
         except Exception as e:
@@ -448,10 +512,13 @@ class FluxerWriter:
         assert self.client is not None
         
         try:
-            sticker = await self.client.create_guild_sticker(
-                guild_id=self.community_id,
-                name=name,
-                image=image_bytes
+            sticker = await self._retry_on_rate_limit(
+                lambda: self.client.create_guild_sticker(
+                    guild_id=self.community_id,
+                    name=name,
+                    image=image_bytes
+                ),
+                f"create sticker {name}"
             )
             return str(sticker["id"])
         except Exception as e:
@@ -479,11 +546,14 @@ class FluxerWriter:
             kwargs["banner"] = f"data:{content_type};base64,{image_data}"
 
         try:
-            await self.client.modify_guild(
-                guild_id=self.community_id,
-                name=name,
-                icon=icon,
-                **kwargs
+            await self._retry_on_rate_limit(
+                lambda: self.client.modify_guild(
+                    guild_id=self.community_id,
+                    name=name,
+                    icon=icon,
+                    **kwargs
+                ),
+                "update community metadata"
             )
         except Exception as e:
             print(f"Failed to update community metadata: {e}")
@@ -505,16 +575,15 @@ class FluxerWriter:
         assert self.client is not None
 
         # 1. Check current state
-        guild = await self.client.get_guild(self.community_id)
+        guild = await self._retry_on_rate_limit(lambda: self.client.get_guild(self.community_id), "fetch community")
         has_icon = bool(guild.get("icon"))
         has_banner = bool(guild.get("banner"))
 
         # 2. Remove icon if set
         if has_icon:
             try:
-                await self.client.modify_guild(
-                    guild_id=self.community_id,
-                    icon=None
+                await self._retry_on_rate_limit(
+                    lambda: self.client.modify_guild(guild_id=self.community_id, icon=None), "remove community icon"
                 )
             except Exception as e:
                 print(f"Failed to remove community icon: {e}")
@@ -523,9 +592,8 @@ class FluxerWriter:
         # 3. Remove banner if set
         if has_banner:
             try:
-                await self.client.modify_guild(
-                    guild_id=self.community_id,
-                    banner=None
+                await self._retry_on_rate_limit(
+                    lambda: self.client.modify_guild(guild_id=self.community_id, banner=None), "remove community banner"
                 )
             except Exception as e:
                 print(f"Failed to remove community banner: {e}")
@@ -542,7 +610,7 @@ class FluxerWriter:
         Returns the count of deleted channels.
         """
         assert self.client is not None
-        channels = await self.client.get_guild_channels(self.community_id)
+        channels = await self._retry_on_rate_limit(lambda: self.client.get_guild_channels(self.community_id), "list channels")
         total = len(channels)
         deleted = 0
         # Delete non-category channels first, then categories
@@ -555,7 +623,7 @@ class FluxerWriter:
                 continue
 
             try:
-                await self.client.delete_channel(ch["id"])
+                await self._retry_on_rate_limit(lambda: self.client.delete_channel(ch["id"]), f"delete channel {ch['id']}")
                 deleted += 1
                 if progress_callback:
                     await progress_callback(ch.get("name", "Unknown"), deleted, total)
@@ -570,7 +638,7 @@ class FluxerWriter:
         Returns the count of channels processed.
         """
         assert self.client is not None
-        channels = await self.client.get_guild_channels(self.community_id)
+        channels = await self._retry_on_rate_limit(lambda: self.client.get_guild_channels(self.community_id), "list channels")
         total = len(channels)
         processed = 0
         for ch in channels:
@@ -585,13 +653,16 @@ class FluxerWriter:
                 overwrites = ch.get("permission_overwrites", [])
                 for ow in overwrites:
                     try:
-                        await self.client.request(
-                            self.client._route(
-                                "DELETE", 
-                                "/channels/{channel_id}/permissions/{overwrite_id}",
-                                channel_id=ch["id"],
-                                overwrite_id=ow["id"]
-                            )
+                        await self._retry_on_rate_limit(
+                            lambda: self.client.request(
+                                self.client._route(
+                                    "DELETE", 
+                                    "/channels/{channel_id}/permissions/{overwrite_id}",
+                                    channel_id=ch["id"],
+                                    overwrite_id=ow["id"]
+                                )
+                            ),
+                            f"delete overwrite {ow['id']} on channel {ch['id']}"
                         )
                     except Exception as e:
                         print(f"Failed to delete overwrite {ow['id']} for channel {ch['id']}: {e}")
@@ -615,12 +686,15 @@ class FluxerWriter:
             return
 
         try:
-            await self.client.edit_channel_permissions(
-                channel_id=target_channel_id,
-                overwrite_id=target_overwrite_id,
-                allow=allow,
-                deny=deny,
-                type=0 if is_role else 1
+            await self._retry_on_rate_limit(
+                lambda: self.client.edit_channel_permissions(
+                    channel_id=target_channel_id,
+                    overwrite_id=target_overwrite_id,
+                    allow=allow,
+                    deny=deny,
+                    type=0 if is_role else 1
+                ),
+                f"set permission on channel {channel_id}"
             )
         except Exception as e:
             print(f"Failed to set permission on channel {channel_id} for overwrite {overwrite_id}: {e}")
@@ -647,7 +721,7 @@ class FluxerWriter:
         except Exception:
             pass
 
-        roles = await self.client.get_guild_roles(self.community_id)
+        roles = await self._retry_on_rate_limit(lambda: self.client.get_guild_roles(self.community_id), "list roles")
         deletable = []
         for r in roles:
             # Skip @everyone (position 0) and managed roles (e.g. bot roles)
@@ -659,7 +733,9 @@ class FluxerWriter:
         deleted = 0
         for role in deletable:
             try:
-                await self.client.delete_guild_role(self.community_id, role["id"])
+                await self._retry_on_rate_limit(
+                    lambda: self.client.delete_guild_role(self.community_id, role["id"]), f"delete role {role['id']}"
+                )
                 deleted += 1
                 if progress_callback:
                     await progress_callback(role.get("name", "Unknown"), deleted, total)
@@ -679,11 +755,13 @@ class FluxerWriter:
 
         # Delete emojis
         try:
-            emojis = await self.client.get_guild_emojis(self.community_id)
+            emojis = await self._retry_on_rate_limit(lambda: self.client.get_guild_emojis(self.community_id), "list emojis")
             emoji_total = len(emojis)
             for emoji in emojis:
                 try:
-                    await self.client.delete_guild_emoji(self.community_id, emoji["id"])
+                    await self._retry_on_rate_limit(
+                        lambda: self.client.delete_guild_emoji(self.community_id, emoji["id"]), f"delete emoji {emoji['id']}"
+                    )
                     emoji_deleted += 1
                     if progress_callback:
                         await progress_callback(emoji.get("name", "Unknown"), "Emoji", emoji_deleted, emoji_total)
@@ -696,11 +774,13 @@ class FluxerWriter:
 
         # Delete stickers
         try:
-            stickers = await self.client.get_guild_stickers(self.community_id)
+            stickers = await self._retry_on_rate_limit(lambda: self.client.get_guild_stickers(self.community_id), "list stickers")
             sticker_total = len(stickers)
             for sticker in stickers:
                 try:
-                    await self.client.delete_guild_sticker(self.community_id, sticker["id"])
+                    await self._retry_on_rate_limit(
+                        lambda: self.client.delete_guild_sticker(self.community_id, sticker["id"]), f"delete sticker {sticker['id']}"
+                    )
                     sticker_deleted += 1
                     if progress_callback:
                         await progress_callback(sticker.get("name", "Unknown"), "Sticker", sticker_deleted, sticker_total)
