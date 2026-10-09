@@ -1021,6 +1021,9 @@ class BackupReader:
     CHANNEL_TYPE_VOICE = ChannelType.voice
     CHANNEL_TYPE_NEWS = ChannelType.news
     CHANNEL_TYPE_FORUM = ChannelType.forum
+    CHANNEL_TYPE_THREAD_PUBLIC = ChannelType.public_thread
+    CHANNEL_TYPE_THREAD_PRIVATE = ChannelType.private_thread
+    CHANNEL_TYPE_THREAD_ANNOUNCEMENT = ChannelType.news_thread
 
     @staticmethod
     def find_item(iterable, **attrs):
@@ -1277,6 +1280,16 @@ class BackupReader:
     async def get_active_threads(self) -> List[BackupThread]:
         """Uniform interface for active threads."""
         return [t for t in self.threads if not t.archived]
+
+    async def get_threads(self, include_archived: bool = True) -> List[BackupThread]:
+        """
+        Uniform interface for the guild's threads (incl. forum posts).
+        include_archived=False returns only active threads.
+        Only threads saved by a message backup are in the database.
+        """
+        if include_archived:
+            return list(self.threads)
+        return await self.get_active_threads()
 
     async def get_backed_up_channel_ids(self) -> List[int]:
         """Returns a list of channel IDs that have messages in the database."""

@@ -31,11 +31,16 @@ def _channel(id, name, category_id=None, position=0):
     return NS(id=id, name=name, category_id=category_id, position=position,
               type=NS(value=0), topic="", nsfw=False, slowmode_delay=0)
 
+def _thread(id, name, category_id=None, position=0, parent=None):
+    return NS(id=id, name=name, category_id=category_id, position=position,
+              type=NS(value=0), topic="", nsfw=False, slowmode_delay=0, parent_id=parent)
 
-def _channel_context(state, categories, channels, target_channels):
+
+def _channel_context(state, categories, channels, threads, target_channels):
     reader = NS(
         get_categories=AsyncMock(return_value=categories),
         get_channels=AsyncMock(return_value=channels),
+        get_threads=AsyncMock(return_value=threads),
         CHANNEL_TYPE_FORUM=NS(value=15),
         CHANNEL_TYPE_VOICE=NS(value=2),
         CHANNEL_TYPE_TEXT=NS(value=0),
@@ -74,6 +79,7 @@ async def test_sync_channel_state_keeps_existing_mappings(fluxer_state):
         fluxer_state,
         categories=[_category(10, "cat")],
         channels=[_channel(11, "general", category_id=10)],
+        threads=[_thread(12, "general", category_id=10, parent=11)],
         target_channels=[{"id": "500", "name": "cat", "type": 4},
                          {"id": "501", "name": "general", "type": 0, "parent_id": "500"}],
     )
@@ -90,6 +96,7 @@ async def test_sync_channel_state_removes_deleted_targets(fluxer_state):
         fluxer_state,
         categories=[_category(10, "cat")],
         channels=[_channel(11, "general", category_id=10)],
+        threads=[_thread(12, "general", category_id=10, parent=11)],
         target_channels=[],
     )
     await sync_channel_state(ctx)
@@ -104,6 +111,7 @@ async def test_sync_channel_state_matches_channel_by_name_under_mapped_category(
         fluxer_state,
         categories=[_category(10, "cat")],
         channels=[_channel(11, "general", category_id=10)],
+        threads=[_thread(12, "general", category_id=10, parent=11)],
         target_channels=[{"id": "500", "name": "cat", "type": 4},
                          {"id": "501", "name": "general", "type": 0, "parent_id": "500"}],
     )
@@ -120,6 +128,7 @@ async def test_reclone_creates_no_duplicates(fluxer_state):
         fluxer_state,
         categories=[_category(10, "cat")],
         channels=[_channel(11, "general", category_id=10)],
+        threads=[_thread(12, "general", category_id=10, parent=11)],
         target_channels=[{"id": "500", "name": "cat", "type": 4},
                          {"id": "501", "name": "general", "type": 0, "parent_id": "500"}],
     )

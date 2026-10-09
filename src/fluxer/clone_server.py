@@ -11,8 +11,8 @@ async def sync_channel_state(context: MigrationContext):
     Scans Fluxer for channels matching Discord names and updates state file mappings.
     This prevents duplicate creation when the state file is empty but channels exist in Fluxer.
     """
-    categories = await context.discord_reader.get_categories()
-    channels = await context.discord_reader.get_channels()
+    categories = await context.sync_reader.get_categories()
+    channels = await context.sync_reader.get_channels()
     fluxer_channels = await context.fluxer_writer.get_channels()
     
     # Build maps for Fluxer lookup
@@ -71,8 +71,9 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
         force: If True, re-create channels even if they exist in state.
     """
     # Sort by position to respect Discord arrangement
-    categories = sorted(await context.discord_reader.get_categories(), key=lambda c: getattr(c, 'position', 0))
-    all_channels = sorted(await context.discord_reader.get_channels(), key=lambda c: getattr(c, 'position', 0))
+    categories = sorted(await context.sync_reader.get_categories(), key=lambda c: getattr(c, 'position', 0))
+    all_channels = sorted(await context.sync_reader.get_channels(), key=lambda c: getattr(c, 'position', 0))
+    all_threads = sorted(await context.sync_reader.get_threads(True), key=lambda t: getattr(t, 'position', 0))
 
     cloned_info = {
         "categories_created": [],
@@ -144,16 +145,25 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
         # Map Discord-specific types to target-supported types
         # 5 (News) -> 0 (Text), and fallback any unknown non-voice types to text
         raw_type = channel.type.value if hasattr(channel.type, 'value') else 0
-        if raw_type == context.discord_reader.CHANNEL_TYPE_VOICE.value:
+        if raw_type == context.sync_reader.CHANNEL_TYPE_VOICE.value:
             ch_type = 2         # GUILD_VOICE
             is_voice = True
-        elif raw_type == context.discord_reader.CHANNEL_TYPE_FORUM.value:
-            ch_type = 15        # GUILD_FORUM
+        elif raw_type == context.sync_reader.CHANNEL_TYPE_FORUM.value:
+            ch_type = 15  # GUILD_FORUM
             is_voice = False
-        elif raw_type == context.discord_reader.CHANNEL_TYPE_NEWS.value:
+        elif raw_type == context.sync_reader.CHANNEL_TYPE_THREAD_ANNOUNCEMENT.value:
+            ch_type = 10  # THREAD_ANNOUNCEMENT
+            is_voice = False
+        elif raw_type == context.sync_reader.CHANNEL_TYPE_THREAD_PUBLIC.value:
+            ch_type = 11  # THREAD_PUBLIC
+            is_voice = False
+        elif raw_type == context.sync_reader.CHANNEL_TYPE_THREAD_PRIVATE.value:
+            ch_type = 12  # THREAD_PRIVATE
+            is_voice = False
+        elif raw_type == context.sync_reader.CHANNEL_TYPE_NEWS.value:
             ch_type = 5         # GUILD_ANNOUNCEMENT
             is_voice = False
-        elif raw_type == context.discord_reader.CHANNEL_TYPE_TEXT.value:
+        elif raw_type == context.sync_reader.CHANNEL_TYPE_TEXT.value:
             ch_type = 0         # GUILD_TEXT
             is_voice = False
         else:

@@ -34,12 +34,15 @@ class MigrationContext:
             from src.core.backup_reader import BackupReader
             backup_path = self._find_backup_path(config.discord_server_id, base_dir)
             self.discord_reader = BackupReader(backup_path)
+            self.sync_reader = DiscordReader(token=config.discord_bot_token,
+                                             server_id=config.discord_server_id)
             logger.info(f"Source mode: BACKUP — reading from {backup_path}")
         else:
             self.discord_reader = DiscordReader(
                 token=config.discord_bot_token,
                 server_id=config.discord_server_id
             )
+            self.sync_reader = self.discord_reader
             logger.info("Source mode: LIVE — using Discord API")
         
         # Build the writer for the active target platform only
@@ -163,6 +166,9 @@ class MigrationContext:
 
     async def start_connections(self):
         await self.discord_reader.start()
+        if self.source_mode == "backup":
+            await self.sync_reader.start()
+        await self.sync_reader.start()
         await self.writer.start()
 
     async def start_target_only(self):

@@ -23,6 +23,9 @@ class DiscordReader:
     CHANNEL_TYPE_VOICE = discord.ChannelType.voice
     CHANNEL_TYPE_NEWS = discord.ChannelType.news
     CHANNEL_TYPE_FORUM = discord.ChannelType.forum
+    CHANNEL_TYPE_THREAD_PUBLIC = discord.ChannelType.public_thread
+    CHANNEL_TYPE_THREAD_PRIVATE = discord.ChannelType.private_thread
+    CHANNEL_TYPE_THREAD_ANNOUNCEMENT = discord.ChannelType.news_thread
 
     @staticmethod
     def find_item(iterable, **attrs):
@@ -234,6 +237,27 @@ class DiscordReader:
         if not self.guild:
             return []
         return self.guild.active_threads
+
+    async def get_threads(self, include_archived: bool = False) -> list[discord.Thread]:
+        """
+        Returns the guild's threads (incl. forum posts) via REST: all active threads and, with
+        include_archived, the archived public threads of every text/announcement/forum channel.
+        Archived private threads need Manage Threads, which the bot doesn't have, so they are not listed.
+        """
+        if not self.guild:
+            return []
+
+        threads: Dict[int, discord.Thread] = {t.id: t for t in await self.guild.active_threads()}
+        if include_archived:
+            for channel in await self.get_channels():
+                if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+                    continue
+                try:
+                    async for thread in channel.archived_threads(limit=None):
+                        threads.setdefault(thread.id, thread)
+                except discord.Forbidden:
+                    logger.warning(f"403 Forbidden: Cannot fetch archived threads in {channel.name} ({channel.id})")
+        return list(threads.values())
 
     async def fetch_channels(self) -> list[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel, discord.ForumChannel]]:
         """Async stub for discord.Guild.fetch_channels."""

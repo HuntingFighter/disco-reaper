@@ -64,6 +64,7 @@ def test_save_messages_and_attachments(db):
             "id": 101, "channel_id": 10, "author_id": 999, "content": "Hello",
             "timestamp": "2023-01-01T00:00:00Z", "type": 0,
             "message_reference": None, "is_pinned": 0, "extra_data": None,
+            "custom_display_name": None, "custom_avatar_url": None,
             "attachments": [
                 {"id": 1, "filename": "file.png", "size": 100,
                  "url": "http://cdn.test/file.png", "content_type": "image/png", "local_hash": "abc"}
@@ -81,9 +82,11 @@ def test_get_last_message_id(db):
     msgs = [
         {"id": 200, "channel_id": 10, "author_id": 1, "content": "a",
          "timestamp": "2023-01-01T00:00:00Z", "type": 0,
+         "custom_display_name": None, "custom_avatar_url": None,
          "message_reference": None, "is_pinned": 0, "extra_data": None},
         {"id": 201, "channel_id": 10, "author_id": 1, "content": "b",
          "timestamp": "2023-01-01T00:01:00Z", "type": 0,
+         "custom_display_name": None, "custom_avatar_url": None,
          "message_reference": None, "is_pinned": 0, "extra_data": None},
     ]
     db.save_messages_batch(msgs)
@@ -94,9 +97,11 @@ def test_stats_by_channel(db):
     msgs = [
         {"id": 101, "channel_id": 10, "author_id": 1, "content": "Hi",
          "timestamp": "2023-01-01T00:00:00Z", "type": 0,
+         "custom_display_name": None, "custom_avatar_url": None,
          "message_reference": None, "is_pinned": 0, "extra_data": None},
         {"id": 102, "channel_id": 10, "author_id": 1, "content": "Bye",
          "timestamp": "2023-01-01T00:01:00Z", "type": 0,
+        "custom_display_name": None, "custom_avatar_url": None,
          "message_reference": None, "is_pinned": 0, "extra_data": None},
     ]
     db.save_messages_batch(msgs)
@@ -129,6 +134,7 @@ def test_get_messages_paged_after_id(db):
     msgs = [
         {"id": i, "channel_id": 10, "author_id": 1, "content": f"msg{i}",
          "timestamp": f"2023-01-01T00:0{i}:00Z", "type": 0,
+         "custom_display_name": None, "custom_avatar_url": None,
          "message_reference": None, "is_pinned": 0, "extra_data": None}
         for i in range(5)
     ]

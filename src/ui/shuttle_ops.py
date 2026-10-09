@@ -805,8 +805,9 @@ class OperationPane(Container):
             if "structure" in preview:
                 structure = preview["structure"]
                 total_ch = sum(len(chans) for chans in structure.values())
+                total_threads = sum(len(threads) for threads in structure.values())
                 num_cats = sum(1 for k in structure if k is not None)
-                modal.write(f"[bold cyan]Server Structure ({num_cats} Categories, {total_ch} Channels):[/bold cyan]")
+                modal.write(f"[bold cyan]Server Structure ({num_cats} Categories, {total_ch} Channels, {total_threads} Threads):[/bold cyan]")
                 
                 # Show uncategorized channels first at the top
                 if None in structure:
@@ -2032,7 +2033,7 @@ class OperationPane(Container):
         if not self.engine:
             return
         
-        reader = self.engine.discord_reader
+        reader = self.engine.sync_reader
         writer = self.engine.writer
         is_fluxer = self.target_platform == "fluxer"
 
@@ -2174,7 +2175,7 @@ class OperationPane(Container):
         """Fetches preview data from Discord (source server) for cloning confirmation,
         comparing with existing mappings in SQLite for presence highlighting."""
         preview = {}
-        reader = self.engine.discord_reader
+        reader = self.engine.sync_reader
         
         # We rely on the global auto-match that ran during connection
         mapping_ch = self.engine.state.channel_map
@@ -2193,13 +2194,13 @@ class OperationPane(Container):
             if "sub_clone_channels" in selections:
                 src_categories = await reader.get_categories()
                 src_channels = await reader.get_channels()
-                
+
                 # Build hierarchy for preview
                 structure = {}
                 for cat in src_categories:
                     cat_exists = str(cat.id) in mapping_cat
                     structure[cat.id] = (cat.name, cat_exists, [])
-                
+
                 for ch in src_channels:
                     ch_exists = str(ch.id) in mapping_ch
                     if ch.category_id in structure:
@@ -2208,7 +2209,7 @@ class OperationPane(Container):
                         if None not in structure:
                             structure[None] = ("No Category", False, [])
                         structure[None][2].append((ch.name, ch_exists))
-                
+
                 preview["structure"] = structure
         except Exception as e:
             logger.warning(f"Clone Preview: failed to fetch structure: {e}")
