@@ -21,6 +21,7 @@ from src.core.configuration import load_config
 from src.core.base import MigrationContext
 from src.core.audit import log_audit_event
 from src.core.exporter import DiscordExporter
+from src.core.structure import CATEGORY, CHANNEL, THREAD, build_structure_tree, render_structure_lines
 from src.ui.modals import (
     ProgressScreen, SubMenuModal, ChannelPickerScreen, OptionSelectModal, MessageIDInputModal,
     ChannelSelectScreen
@@ -803,31 +804,13 @@ class OperationPane(Container):
                 modal.write("")
 
             if "structure" in preview:
-                structure = preview["structure"]
-                total_ch = sum(len(chans) for chans in structure.values())
-                total_threads = sum(len(threads) for threads in structure.values())
-                num_cats = sum(1 for k in structure if k is not None)
-                modal.write(f"[bold cyan]Server Structure ({num_cats} Categories, {total_ch} Channels, {total_threads} Threads):[/bold cyan]")
-                
-                # Show uncategorized channels first at the top
-                if None in structure:
-                    _, _, uncat_channels = structure[None]
-                    for ch_name, ch_exists in uncat_channels:
-                        if ch_exists:
-                            modal.write(f"  - [green]# {ch_name}[/green]")
-                        else:
-                            modal.write(f"  - # {ch_name}")
-                
-                for cat_id, (cat_name, cat_exists, channels) in structure.items():
-                    if cat_id is None:
-                        continue  # already shown above
-                    cat_color = "green" if cat_exists else "bold yellow"
-                    modal.write(f"  [{cat_color}]📁 {cat_name}[/{cat_color}]")
-                    for ch_name, ch_exists in channels:
-                        if ch_exists:
-                            modal.write(f"    - [green]# {ch_name}[/green]")
-                        else:
-                            modal.write(f"    - # {ch_name}")
+                structure = preview["structure"]  # StructureNode tree (root)
+                modal.write(
+                    f"[bold cyan]Server Structure ({structure.count(CATEGORY)} Categories, "
+                    f"{structure.count(CHANNEL)} Channels, {structure.count(THREAD)} Threads):[/bold cyan]"
+                )
+                for line in render_structure_lines(structure):
+                    modal.write(line)
                 modal.write("")
 
             if connections_started:
@@ -2025,9 +2008,6 @@ class OperationPane(Container):
 
         return preview
 
-    async def _fetch_clone_preview(self, selections: list[str]) -> dict[str, Any]:
-        """Fetches preview data from Discord (source server) for cloning confirmation,
-        comparing with existing entities on the target server for presence highlighting."""
     async def _perform_auto_matching(self):
         """Matches Discord entities (roles, channels, emojis, stickers) with target platform items by name."""
         if not self.engine:
@@ -2177,10 +2157,11 @@ class OperationPane(Container):
         preview = {}
         reader = self.engine.sync_reader
         
-        # We rely on the global auto-match that ran during connection
-        mapping_ch = self.engine.state.channel_map
-        mapping_cat = self.engine.state.category_map
-        mapping_role = self.engine.state.role_map
+        # We rely on the global auto-match that ran during connection.
+        # Mapping keys are int on Fluxer and str on Stoat, so compare as str.
+        mapping_ch = {str(k) for k in self.engine.state.channel_map}
+        mapping_cat = {str(k) for k in self.engine.state.category_map}
+        mapping_role = {str(k) for k in self.engine.state.role_map}
 
         try:
             if "sub_clone_roles" in selections:
@@ -2194,23 +2175,17 @@ class OperationPane(Container):
             if "sub_clone_channels" in selections:
                 src_categories = await reader.get_categories()
                 src_channels = await reader.get_channels()
+                try:
+                    src_threads = await reader.get_threads()
+                except Exception as e:
+                    logger.warning(f"Clone Preview: failed to fetch threads: {e}")
+                    src_threads = []
 
-                # Build hierarchy for preview
-                structure = {}
-                for cat in src_categories:
-                    cat_exists = str(cat.id) in mapping_cat
-                    structure[cat.id] = (cat.name, cat_exists, [])
+                def is_mapped(kind: str, item_id) -> bool:
+                    return str(item_id) in (mapping_cat if kind == CATEGORY else mapping_ch)
 
-                for ch in src_channels:
-                    ch_exists = str(ch.id) in mapping_ch
-                    if ch.category_id in structure:
-                        structure[ch.category_id][2].append((ch.name, ch_exists))
-                    else:
-                        if None not in structure:
-                            structure[None] = ("No Category", False, [])
-                        structure[None][2].append((ch.name, ch_exists))
-
-                preview["structure"] = structure
+                # Recursive tree: categories > channels > threads
+                preview["structure"] = build_structure_tree(src_categories, src_channels, src_threads, is_mapped)
         except Exception as e:
             logger.warning(f"Clone Preview: failed to fetch structure: {e}")
         
