@@ -56,3 +56,6 @@ FLUXER-*/
 REAPER-*/
 EXPORT-*/
 screenshots/
+
+# PyCharm
+.idea/
