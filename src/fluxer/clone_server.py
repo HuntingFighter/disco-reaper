@@ -74,16 +74,6 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
     categories = sorted(await context.discord_reader.get_categories(), key=lambda c: getattr(c, 'position', 0))
     all_channels = sorted(await context.discord_reader.get_channels(), key=lambda c: getattr(c, 'position', 0))
 
-    # Only migrate text-like and voice channels. Forum channels are not yet supported in Fluxer.
-    reader = context.discord_reader
-    channels = [
-        ch for ch in all_channels
-        if ch.type != reader.CHANNEL_TYPE_FORUM
-    ]
-    skipped = [ch.name for ch in all_channels if ch not in channels]
-    if skipped:
-        logger.info(f"Skipping {len(skipped)} forum channel(s): {', '.join(skipped)}")
-    
     cloned_info = {
         "categories_created": [],
         "channels_created": [],
@@ -104,7 +94,7 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
     channels_to_create = []
     channels_to_move = []
     
-    for ch in channels:
+    for ch in all_channels:
         discord_id = str(ch.id)
         fluxer_id = context.state.get_fluxer_channel_id(discord_id)
         
@@ -155,10 +145,16 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
         # 5 (News) -> 0 (Text), and fallback any unknown non-voice types to text
         raw_type = channel.type.value if hasattr(channel.type, 'value') else 0
         if raw_type == context.discord_reader.CHANNEL_TYPE_VOICE.value:
-            ch_type = 2
+            ch_type = 2         # GUILD_VOICE
             is_voice = True
-        elif raw_type in [context.discord_reader.CHANNEL_TYPE_TEXT.value, context.discord_reader.CHANNEL_TYPE_NEWS.value]:
-            ch_type = 0
+        elif raw_type == context.discord_reader.CHANNEL_TYPE_FORUM.value:
+            ch_type = 15        # GUILD_FORUM
+            is_voice = False
+        elif raw_type == context.discord_reader.CHANNEL_TYPE_NEWS.value:
+            ch_type = 5         # GUILD_ANNOUNCEMENT
+            is_voice = False
+        elif raw_type == context.discord_reader.CHANNEL_TYPE_TEXT.value:
+            ch_type = 0         # GUILD_TEXT
             is_voice = False
         else:
             # Fallback for Stage channels (13) etc. to Text for safety
