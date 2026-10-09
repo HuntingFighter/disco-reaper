@@ -16,7 +16,7 @@ async def sync_roles_state(context: MigrationContext):
     
     # Build name -> id maps and ID sets for Fluxer for fast lookup
     fluxer_role_map = {r.get("name"): r.get("id") for r in fluxer_roles if r.get("name")}
-    fluxer_role_ids = {r.get("id") for r in fluxer_roles}
+    fluxer_role_ids = {str(r.get("id")) for r in fluxer_roles}
     
     updates = 0
     removals = 0
@@ -27,7 +27,7 @@ async def sync_roles_state(context: MigrationContext):
         fluxer_id = context.state.get_fluxer_role_id(discord_id)
         
         if fluxer_id:
-            if fluxer_id not in fluxer_role_ids:
+            if str(fluxer_id) not in fluxer_role_ids:
                 context.state.remove_role_mapping(discord_id)
                 removals += 1
         elif role.name in fluxer_role_map:

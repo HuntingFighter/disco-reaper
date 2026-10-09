@@ -35,7 +35,7 @@ async def sync_channel_state(context: MigrationContext):
         discord_id = str(cat.id)
         fluxer_id = context.state.get_fluxer_category_id(discord_id)
         if fluxer_id:
-            if fluxer_id not in fluxer_id_set:
+            if str(fluxer_id) not in fluxer_id_set:
                 context.state.remove_category_mapping(discord_id)
                 removals += 1
         elif cat.name in fluxer_cats:
@@ -47,13 +47,13 @@ async def sync_channel_state(context: MigrationContext):
         discord_id = str(ch.id)
         fluxer_id = context.state.get_fluxer_channel_id(discord_id)
         if fluxer_id:
-            if fluxer_id not in fluxer_id_set:
+            if str(fluxer_id) not in fluxer_id_set:
                 context.state.remove_channel_mapping(discord_id)
                 removals += 1
         else:
             # Try to match by name within the mapped parent category
             p_discord_id = str(ch.category_id) if ch.category_id else "root"
-            p_fluxer_id = context.state.get_fluxer_category_id(p_discord_id) if p_discord_id != "root" else "root"
+            p_fluxer_id = str(context.state.get_fluxer_category_id(p_discord_id)) if p_discord_id != "root" else "root"
             
             if p_fluxer_id in fluxer_structure and ch.name in fluxer_structure[p_fluxer_id]:
                 context.state.set_channel_mapping(discord_id, fluxer_structure[p_fluxer_id][ch.name])

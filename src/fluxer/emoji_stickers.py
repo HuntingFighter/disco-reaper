@@ -20,8 +20,8 @@ async def sync_assets_state(context: MigrationContext):
     # Build name -> id maps and ID sets for Fluxer for fast lookup
     fluxer_emoji_map = {e.get("name"): e.get("id") for e in fluxer_emojis if e.get("name")}
     fluxer_sticker_map = {s.get("name"): s.get("id") for s in fluxer_stickers if s.get("name")}
-    fluxer_emoji_ids = {e.get("id") for e in fluxer_emojis}
-    fluxer_sticker_ids = {s.get("id") for s in fluxer_stickers}
+    fluxer_emoji_ids = {str(e.get("id")) for e in fluxer_emojis}
+    fluxer_sticker_ids = {str(s.get("id")) for s in fluxer_stickers}
     
     updates = 0
     removals = 0
@@ -32,7 +32,7 @@ async def sync_assets_state(context: MigrationContext):
         fluxer_id = context.state.get_fluxer_emoji_id(discord_id)
         
         if fluxer_id:
-            if fluxer_id not in fluxer_emoji_ids:
+            if str(fluxer_id) not in fluxer_emoji_ids:
                 context.state.remove_emoji_mapping(discord_id)
                 removals += 1
         elif emoji.name in fluxer_emoji_map:
@@ -45,7 +45,7 @@ async def sync_assets_state(context: MigrationContext):
         fluxer_id = context.state.get_fluxer_sticker_id(discord_id)
         
         if fluxer_id:
-            if fluxer_id not in fluxer_sticker_ids:
+            if str(fluxer_id) not in fluxer_sticker_ids:
                 context.state.remove_sticker_mapping(discord_id)
                 removals += 1
         elif sticker.name in fluxer_sticker_map:
