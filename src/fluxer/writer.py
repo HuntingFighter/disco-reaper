@@ -27,6 +27,34 @@ def _unparsed_rate_limit_wait(exc: BaseException, attempt: int) -> Optional[floa
             continue
     return min(RATE_LIMIT_BASE_WAIT * (2 ** attempt), RATE_LIMIT_MAX_WAIT)
 
+
+class _UnparsedRateLimitLogFilter(logging.Filter):
+    """
+    fluxer.py logs a non-JSON 429 as a generic "Connection error: 429, message='Attempt to decode
+    JSON with unexpected mimetype: text/plain'" before retrying it internally. Rewrite those records
+    so the log shows them as rate limits. fluxer.py sleeps 1 + attempt seconds after logging attempt n.
+    All other records pass through unchanged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (
+            isinstance(record.msg, str)
+            and record.msg.startswith("Connection error")
+            and isinstance(args, tuple)
+            and len(args) == 2
+            and isinstance(args[0], aiohttp.ClientResponseError)
+            and args[0].status == 429
+        ):
+            exc, attempt = args
+            record.msg = "Fluxer: Rate limited (unparsed 429) on %s %s, retrying in %.1fs (attempt %d)"
+            record.args = (exc.request_info.method, exc.request_info.real_url, 1.0 + attempt, attempt)
+        return True
+
+
+logging.getLogger("fluxer.http").addFilter(_UnparsedRateLimitLogFilter())
+
+
 class FluxerWriter:
     def __init__(self, token: str, community_id: str, api_url: str = "default"):
         self.token = token

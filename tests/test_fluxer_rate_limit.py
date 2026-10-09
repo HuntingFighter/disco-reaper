@@ -161,3 +161,78 @@ async def test_danger_zone_delete_retries(writer, sleeps):
 
     assert await writer.delete_all_channels() == 1
     assert writer.client.delete_channel.await_count == 2
+
+
+# --- Log rewrite of fluxer.py's internal retry of non-JSON 429s ---
+
+import logging
+from aiohttp import web
+from multidict import CIMultiDictProxy
+from yarl import URL
+
+
+def _request_info(method="PATCH", url="https://api.fluxer.app/v1/channels/5"):
+    return aiohttp.RequestInfo(URL(url), method, CIMultiDictProxy(CIMultiDict()), URL(url))
+
+
+def test_fluxer_connection_error_for_plain_429_is_logged_as_rate_limit(caplog):
+    exc = aiohttp.ContentTypeError(
+        _request_info(), (), status=429,
+        message="Attempt to decode JSON with unexpected mimetype: text/plain", headers=CIMultiDict(),
+    )
+    with caplog.at_level(logging.WARNING, logger="fluxer.http"):
+        logging.getLogger("fluxer.http").warning("Connection error: %s, retrying (attempt %d)", exc, 2)
+
+    assert caplog.messages == [
+        "Fluxer: Rate limited (unparsed 429) on PATCH https://api.fluxer.app/v1/channels/5, retrying in 3.0s (attempt 2)"
+    ]
+    assert caplog.records[0].levelno == logging.WARNING
+
+
+def test_other_fluxer_connection_errors_are_left_alone(caplog):
+    exc = aiohttp.ClientConnectionError("connection reset")
+    with caplog.at_level(logging.WARNING, logger="fluxer.http"):
+        logging.getLogger("fluxer.http").warning("Connection error: %s, retrying (attempt %d)", exc, 1)
+
+    assert caplog.messages == ["Connection error: connection reset, retrying (attempt 1)"]
+
+
+@pytest.mark.asyncio
+async def test_real_fluxer_client_plain_429_logs_rate_limit(caplog, monkeypatch):
+    """End to end through fluxer.py's HTTPClient, so the filter tracks the library's real log format."""
+    from fluxer import HTTPClient
+    import fluxer.http as fluxer_http
+
+    real_sleep = fluxer_http.asyncio.sleep
+
+    async def no_wait(delay, *args, **kwargs):
+        await real_sleep(0)
+
+    responses = [
+        lambda: web.Response(status=429, text="Too Many Requests", content_type="text/plain"),
+        lambda: web.json_response({"id": "5"}),
+    ]
+
+    async def handler(request):
+        return responses.pop(0)()
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(fluxer_http.asyncio, "sleep", no_wait)
+    try:
+        async with HTTPClient("t", api_url=f"http://127.0.0.1:{port}/v1") as http:
+            with caplog.at_level(logging.WARNING, logger="fluxer.http"):
+                assert await http.modify_channel(channel_id="5", name="general") == {"id": "5"}
+    finally:
+        await runner.cleanup()
+
+    messages = [r.getMessage() for r in caplog.records if r.name == "fluxer.http"]
+    assert messages == [
+        f"Fluxer: Rate limited (unparsed 429) on PATCH http://127.0.0.1:{port}/v1/channels/5, retrying in 2.0s (attempt 1)"
+    ]
+    assert not any("mimetype" in m for m in messages)
