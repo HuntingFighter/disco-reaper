@@ -1136,7 +1136,8 @@ class OperationPane(Container):
         d_channels = await self.engine.discord_reader.get_channels()
         text_channels = [c for c in d_channels if c.type in [
             self.engine.discord_reader.CHANNEL_TYPE_TEXT, 
-            self.engine.discord_reader.CHANNEL_TYPE_NEWS
+            self.engine.discord_reader.CHANNEL_TYPE_NEWS,
+            self.engine.discord_reader.CHANNEL_TYPE_FORUM
         ]]
         
         modal.write(f"[bold cyan]Auto-Test: Found {len(text_channels)} channels to migrate.[/bold cyan]")
@@ -1199,9 +1200,11 @@ class OperationPane(Container):
             # If reading from backup, only show channels that have actual message backup data
             if getattr(self.engine, "source_mode", "live") == "backup" and hasattr(self.engine.discord_reader, "get_backed_up_channel_ids"):
                 valid_ids = await self.engine.discord_reader.get_backed_up_channel_ids()
-                full_d = [c for c in full_d if c.id in valid_ids]
+                # Forum messages are stored under their posts (threads), not the forum itself
+                post_parents = {t.parent_id for t in getattr(self.engine.discord_reader, "threads", []) if t.id in valid_ids}
+                full_d = [c for c in full_d if c.id in valid_ids or c.id in post_parents]
                 
-            d_channels = [c for c in full_d if c.type in [self.engine.discord_reader.CHANNEL_TYPE_TEXT, self.engine.discord_reader.CHANNEL_TYPE_NEWS]]
+            d_channels = [c for c in full_d if c.type in [self.engine.discord_reader.CHANNEL_TYPE_TEXT, self.engine.discord_reader.CHANNEL_TYPE_NEWS, self.engine.discord_reader.CHANNEL_TYPE_FORUM]]
             d_cats = await self.engine.discord_reader.get_categories()
             d_cat_map = {c.id: c.name for c in d_cats}
 

@@ -236,7 +236,7 @@ class DiscordReader:
         """Returns all active threads in the guild."""
         if not self.guild:
             return []
-        return self.guild.active_threads
+        return await self.guild.active_threads()
 
     async def get_threads(self, include_archived: bool = False) -> list[discord.Thread]:
         """

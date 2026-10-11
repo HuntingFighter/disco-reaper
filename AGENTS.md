@@ -175,8 +175,14 @@ Reference: https://docs.discord.com/developers/reference
 - **Model:** Fluxer is Discord-like (snowflake IDs, permission bitfields, overwrites —
   e.g. `deny=1024` is View Channel) but not identical. Check before assuming a
   Discord field, channel/message type or permission maps 1:1.
-- **Not supported natively:** threads and forums. Threads are migrated as normal
-  messages in their parent channel; forums are partial. Keep that workaround.
+- **Threads and forums:** Fluxer supports them (types 10/11/12, forum 15, media 16), but
+  fluxer.py has no thread routes yet, so `FluxerWriter` calls the REST API directly via
+  `self.client.request(Route(...))` (see https://docs.fluxer.app/http-api/threads/).
+  Cloning creates threads under their mapped parent and stores them with
+  `set_channel_mapping(thread_id, ...)`; forum posts are created during message migration
+  together with their first message (webhook `thread_name`). Webhooks can't live on a
+  thread, so thread messages go through the parent's webhook with `?thread_id=`. If a
+  thread can't be created, messages fall back to inline markers in the parent channel.
 - **Stability:** Fluxer has stability issues under high traffic. Writes must be
   resumable — record each mapping (`set_*_mapping`, `set_message_mapping`,
   `update_last_message_id`) right after the target confirms, so a crash or restart

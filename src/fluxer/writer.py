@@ -3,7 +3,9 @@ import io
 import logging
 from typing import Optional, List, Dict, Any, Awaitable, Callable
 import aiohttp
+import json
 from fluxer import Bot, Webhook, Forbidden, File
+from fluxer.http import Route
 
 logger = logging.getLogger(__name__)
 
@@ -326,10 +328,192 @@ class FluxerWriter:
         )
         return self._channels_cache
 
-    async def send_message(self, channel_id: str, author_name: str, content: str, timestamp: int, author_avatar_url: Optional[str] = None, files: Optional[List[Dict[str, Any]]] = None, reply_to_message_id: Optional[str] = None, is_forwarded: bool = False, embeds: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
+    # -- Threads and forums --
+    # fluxer.py has no thread routes yet, so these call the plain REST API (https://docs.fluxer.app/http-api/threads/)
+    # through fluxer.py's HTTP client, which still handles auth, rate-limit buckets and error mapping.
+
+    def _route(self, method: str, path: str, **params: Any) -> Route:
+        return Route(method, path, base_url=self.client.api_url, **params)
+
+    async def create_thread(self, channel_id: str, name: str, type: int = 11, auto_archive_duration: Optional[int] = None, slowmode_delay: Optional[int] = None, invitable: Optional[bool] = None) -> str:
+        """
+        Starts a thread without a source message in a text (type 11/12) or announcement (type 10) channel.
+        auto_archive_duration is in minutes (60, 1440, 4320, 10080); Fluxer defaults to 4320.
+        Returns the new thread ID.
+        """
+        assert self.client is not None
+        payload: Dict[str, Any] = {"name": name, "type": type}
+        if auto_archive_duration is not None:
+            payload["auto_archive_duration"] = auto_archive_duration
+        if slowmode_delay is not None:
+            payload["rate_limit_per_user"] = slowmode_delay
+        if invitable is not None and type == 12:
+            payload["invitable"] = invitable
+
+        logger.debug(f"Fluxer: Creating thread {name} (type {type}) in channel {channel_id}")
+        thread = await self._retry_on_rate_limit(
+            lambda: self.client.request(self._route("POST", "/channels/{channel_id}/threads", channel_id=channel_id), json=payload),
+            f"create thread {name}"
+        )
+        return str(thread["id"])
+
+    async def create_thread_from_message(self, channel_id: str, message_id: str, name: str, auto_archive_duration: Optional[int] = None, slowmode_delay: Optional[int] = None) -> str:
+        """
+        Starts a public thread on an existing target message (a default message or a reply; one thread per message).
+        Returns the new thread ID.
+        """
+        assert self.client is not None
+        payload: Dict[str, Any] = {"name": name}
+        if auto_archive_duration is not None:
+            payload["auto_archive_duration"] = auto_archive_duration
+        if slowmode_delay is not None:
+            payload["rate_limit_per_user"] = slowmode_delay
+
+        logger.debug(f"Fluxer: Creating thread {name} on message {message_id} in channel {channel_id}")
+        thread = await self._retry_on_rate_limit(
+            lambda: self.client.request(
+                self._route("POST", "/channels/{channel_id}/messages/{message_id}/threads", channel_id=channel_id, message_id=message_id),
+                json=payload
+            ),
+            f"create thread {name} from message {message_id}"
+        )
+        return str(thread["id"])
+
+    async def create_forum_post(self, channel_id: str, name: str, content: str, embeds: Optional[List[Dict[str, Any]]] = None, applied_tags: Optional[List[str]] = None, auto_archive_duration: Optional[int] = None, slowmode_delay: Optional[int] = None) -> str:
+        """
+        Creates a post in a forum/media channel, with the bot as author of the first message.
+        To keep the original author's name and avatar, use send_message(..., thread_name=...) instead.
+        Returns the new post (thread) ID.
+        """
+        assert self.client is not None
+        message: Dict[str, Any] = {"content": content}
+        if embeds:
+            message["embeds"] = embeds
+        payload: Dict[str, Any] = {"name": name, "message": message}
+        if applied_tags:
+            payload["applied_tags"] = [str(t) for t in applied_tags[:5]]
+        if auto_archive_duration is not None:
+            payload["auto_archive_duration"] = auto_archive_duration
+        if slowmode_delay is not None:
+            payload["rate_limit_per_user"] = slowmode_delay
+
+        logger.debug(f"Fluxer: Creating forum post {name} in channel {channel_id}")
+        post = await self._retry_on_rate_limit(
+            lambda: self.client.request(self._route("POST", "/channels/{channel_id}/threads", channel_id=channel_id), json=payload),
+            f"create forum post {name}"
+        )
+        return str(post["id"])
+
+    async def modify_thread(self, thread_id: str, name: Optional[str] = None, archived: Optional[bool] = None, locked: Optional[bool] = None, auto_archive_duration: Optional[int] = None, slowmode_delay: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Updates a thread via the Modify Channel route. Only the given fields are sent.
+        An archived thread accepts no other change unless archived=False is sent with it.
+        """
+        assert self.client is not None
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if archived is not None:
+            payload["archived"] = archived
+        if locked is not None:
+            payload["locked"] = locked
+        if auto_archive_duration is not None:
+            payload["auto_archive_duration"] = auto_archive_duration
+        if slowmode_delay is not None:
+            payload["rate_limit_per_user"] = slowmode_delay
+
+        logger.debug(f"Fluxer: Modifying thread {thread_id}: {payload}")
+        return await self._retry_on_rate_limit(
+            lambda: self.client.request(self._route("PATCH", "/channels/{channel_id}", channel_id=thread_id), json=payload),
+            f"modify thread {thread_id}"
+        )
+
+    async def get_active_threads(self) -> List[Dict[str, Any]]:
+        """Returns the community's active threads the bot can see (incl. forum posts)."""
+        assert self.client is not None
+        data = await self._retry_on_rate_limit(
+            lambda: self.client.request(self._route("GET", "/guilds/{guild_id}/threads/active", guild_id=self.community_id)),
+            "list active threads"
+        )
+        return (data or {}).get("threads", [])
+
+    async def get_archived_threads(self, channel_id: str, private: bool = False) -> List[Dict[str, Any]]:
+        """
+        Returns all archived public (or, with private=True, private) threads of a channel, following pagination.
+        Private archived threads need the bot to be a thread moderator and work on text channels only.
+        """
+        assert self.client is not None
+        path = "/channels/{channel_id}/threads/archived/" + ("private" if private else "public")
+        threads: List[Dict[str, Any]] = []
+        before: Optional[str] = None
+        while True:
+            params: Dict[str, Any] = {"limit": 100}
+            if before:
+                params["before"] = before
+            data = await self._retry_on_rate_limit(
+                lambda: self.client.request(self._route("GET", path, channel_id=channel_id), params=params),
+                f"list archived threads {channel_id}"
+            ) or {}
+            page = data.get("threads", [])
+            threads.extend(page)
+            if not data.get("has_more") or not page:
+                return threads
+            before = (page[-1].get("thread_metadata") or {}).get("archive_timestamp")
+            if not before:
+                return threads
+
+    async def create_forum_tag(self, channel_id: str, name: str, moderated: bool = False, emoji_id: Optional[str] = None, emoji_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Adds a tag to a forum/media channel (max 20 per channel, unique names, at most one emoji field).
+        Returns the updated channel object; the new tag is in its available_tags.
+        """
+        assert self.client is not None
+        payload: Dict[str, Any] = {"name": name, "moderated": moderated}
+        if emoji_id is not None:
+            payload["emoji_id"] = str(emoji_id)
+        elif emoji_name is not None:
+            payload["emoji_name"] = emoji_name
+
+        self._channels_cache = None
+        return await self._retry_on_rate_limit(
+            lambda: self.client.request(self._route("POST", "/channels/{channel_id}/tags", channel_id=channel_id), json=payload),
+            f"create forum tag {name}"
+        )
+
+    async def _execute_webhook_in_thread(self, webhook: Webhook, content: str, username: str, avatar_url: Optional[str], files: Optional[List[Dict[str, Any]]], embeds: Optional[List[Dict[str, Any]]], thread_id: Optional[str] = None, thread_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Executes a webhook into a thread of its channel (thread_id) or creates a forum post (thread_name).
+        fluxer.py's Webhook.send can't pass the thread_id query parameter, so this calls the route directly.
+        """
+        payload: Dict[str, Any] = {"content": content, "username": username}
+        if avatar_url:
+            payload["avatar_url"] = avatar_url
+        if embeds:
+            payload["embeds"] = embeds
+        if thread_name:
+            payload["thread_name"] = thread_name
+        params = {"wait": "true"}
+        if thread_id:
+            params["thread_id"] = str(thread_id)
+        route = self._route("POST", "/webhooks/{webhook_id}/{token}", webhook_id=webhook.id, token=webhook.token)
+
+        if not files:
+            return await self.client.request(route, json=payload, params=params)
+        # FormData can only be sent once, so it is built per call
+        form = aiohttp.FormData()
+        payload["attachments"] = [{"id": i, "filename": f["filename"]} for i, f in enumerate(files)]
+        form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+        for i, f in enumerate(files):
+            form.add_field(f"files[{i}]", f["data"], filename=f["filename"])
+        return await self.client.request(route, data=form, params=params)
+
+    async def send_message(self, channel_id: str, author_name: str, content: str, timestamp: int, author_avatar_url: Optional[str] = None, files: Optional[List[Dict[str, Any]]] = None, reply_to_message_id: Optional[str] = None, is_forwarded: bool = False, embeds: Optional[List[Dict[str, Any]]] = None, thread_id: Optional[str] = None, thread_name: Optional[str] = None) -> Optional[str]:
         """
         Sends a message to the target channel.
         Uses a webhook to mimic the original author if possible.
+        thread_id: post into this thread of channel_id (channel_id stays the parent, which owns the webhook).
+        thread_name: channel_id is a forum; create a new post with this message as its first message.
+            The post (thread) ID equals the returned message ID.
         Returns the ID of the sent message if available.
         """
         assert self.client is not None
@@ -388,7 +572,30 @@ class FluxerWriter:
         try:
             # Current limitation: fluxer.py execute_webhook doesn't support 'message_reference' yet.
             # So if we have a reply, we MUST use the bot's direct send method.
-            if webhook and not reply_to_message_id:
+            if webhook and (thread_id or thread_name) and not reply_to_message_id:
+                logger.debug(f"Fluxer: Sending message via webhook {webhook.id} for user '{author_name}' (thread_id={thread_id}, thread_name={thread_name})")
+                try:
+                    msg_data = await self._retry_on_rate_limit(
+                        lambda: asyncio.wait_for(
+                            self._execute_webhook_in_thread(
+                                webhook,
+                                content=final_content,
+                                username=f"{author_name} (discord)",
+                                avatar_url=author_avatar_url,
+                                files=files,
+                                embeds=normalized_embeds,
+                                thread_id=thread_id,
+                                thread_name=thread_name
+                            ),
+                            timeout=45.0
+                        ),
+                        f"webhook send in thread {thread_id or thread_name} of channel {channel_id}"
+                    )
+                    return str(msg_data["id"]) if msg_data else None
+                except asyncio.TimeoutError:
+                    logger.error(f"Fluxer: Webhook send timed out after 45s for thread {thread_id or thread_name} of channel {channel_id}")
+                    return None
+            elif webhook and not reply_to_message_id:
                 logger.debug(f"Fluxer: Sending message via webhook {webhook.id} for user '{author_name}'")
                 try:
                     msg = await self._retry_on_rate_limit(
@@ -420,15 +627,21 @@ class FluxerWriter:
                 bot_prefix += f"-# · {author_name}\n"
                 
                 final_bot_content = bot_prefix + display_content if display_content else bot_prefix
-                
+
+                if thread_name:
+                    # Forum channels don't take messages directly; the first message shares the post's ID
+                    return await self.create_forum_post(channel_id, thread_name, final_bot_content, embeds=normalized_embeds)
+
+                # A thread is a channel of its own, so the bot sends straight into it
+                target_channel_id = thread_id or channel_id
                 message_reference = None
                 if reply_to_message_id:
-                    message_reference = {"message_id": str(reply_to_message_id), "channel_id": str(channel_id)}
+                    message_reference = {"message_id": str(reply_to_message_id), "channel_id": str(target_channel_id)}
 
                 logger.debug(f"Fluxer: Sending message via bot for user '{author_name}'")
                 try:
                     kwargs = {
-                        "channel_id": channel_id,
+                        "channel_id": target_channel_id,
                         "content": final_bot_content,
                         "embeds": normalized_embeds
                     }

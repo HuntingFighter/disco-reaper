@@ -67,8 +67,9 @@ Here's complete list of everything the tool can handle and any specific caveats 
 
 ### Threads & Forums
 * 🟩 **Active & Archived Threads**: Scans and migrates messages from all threads.
-* 🟧 **Thread Structure**: Maintains the nesting of threads within their parent channels.
-> This is a workaround as Threads and Forums are not yet implement in Fluxer and Stoat
+* 🟩 **Fluxer: Native Threads**: Threads are recreated as real threads under their parent channel, keeping the original authors. Archived and locked threads are archived/locked again once their messages are migrated.
+* 🟧 **Fluxer: Forum Posts**: Forum posts are created as real posts with their first message during message migration (not while cloning the structure). Forum tags are not copied yet.
+* 🟧 **Stoat: Thread Structure**: Stoat has no threads, so thread messages are migrated into their parent channel between thread markers.
 
 ### Misc features
 * 🟩 **Incremental Sync**: Scans migration database to find the "Last Message ID." It skips duplicate data and continues where it left off.

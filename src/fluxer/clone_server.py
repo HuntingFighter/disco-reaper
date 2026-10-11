@@ -6,6 +6,117 @@ from src.core.base import MigrationContext
 
 logger = logging.getLogger(__name__)
 
+# Fluxer channel types (same numbers as Discord)
+FLUXER_ANNOUNCEMENT = 5
+FLUXER_THREAD_TYPES = {10, 11, 12}
+FLUXER_FORUM_TYPES = {15, 16}  # forum, media: posts are created with their first message
+ARCHIVE_DURATIONS = {60, 1440, 4320, 10080}
+
+
+async def _fluxer_channel_type(context: MigrationContext, fluxer_channel_id: str) -> int | None:
+    for c in await context.fluxer_writer.get_channels():
+        if str(c.get("id")) == str(fluxer_channel_id):
+            return c.get("type")
+    return None
+
+
+async def resolve_target_thread(context: MigrationContext, thread, parent_message_id: str | None = None, force: bool = False) -> tuple[str | None, str | None, str | None]:
+    """
+    Finds or creates the Fluxer thread for a source thread.
+    Returns (parent_target_id, target_thread_id, forum_post_name):
+    - parent_target_id is the mapped Fluxer parent channel (owns the webhook); None if the parent isn't cloned yet.
+    - target_thread_id is the Fluxer thread, created now if it wasn't mapped.
+    - forum_post_name is set instead when the parent is a forum/media channel: the post is created
+      together with its first message (writer.send_message(thread_name=...)).
+    parent_message_id: migrated Fluxer message the thread starts from, if any (else a standalone thread).
+    """
+    parent_target_id = context.state.get_fluxer_channel_id(str(thread.parent_id)) if getattr(thread, "parent_id", None) else None
+    if not parent_target_id:
+        return None, None, None
+    parent_target_id = str(parent_target_id)  # the Fluxer DB returns IDs as int
+
+    existing = context.state.get_fluxer_channel_id(str(thread.id))
+    if existing and not force:
+        return parent_target_id, str(existing), None
+
+    parent_type = await _fluxer_channel_type(context, parent_target_id)
+    name = (thread.name or "thread")[:100]
+    if parent_type in FLUXER_FORUM_TYPES:
+        return parent_target_id, None, name
+
+    # Announcement parents only take announcement threads; text parents take public/private
+    t_type = getattr(thread, "type", 11)
+    raw_type = t_type.value if hasattr(t_type, "value") else t_type
+    if parent_type == FLUXER_ANNOUNCEMENT:
+        thread_type = 10
+    else:
+        thread_type = raw_type if raw_type in (11, 12) else 11
+    archive = getattr(thread, "auto_archive_duration", None)
+    archive = archive if archive in ARCHIVE_DURATIONS else None
+    slowmode = getattr(thread, "slowmode_delay", None) or None
+
+    if parent_message_id:
+        target_thread_id = await context.fluxer_writer.create_thread_from_message(
+            parent_target_id, parent_message_id, name, auto_archive_duration=archive, slowmode_delay=slowmode
+        )
+    else:
+        target_thread_id = await context.fluxer_writer.create_thread(
+            parent_target_id, name, type=thread_type, auto_archive_duration=archive, slowmode_delay=slowmode
+        )
+    context.state.set_channel_mapping(str(thread.id), target_thread_id)
+    logger.info(f"Created Fluxer thread '{name}' ({target_thread_id}) for Discord thread {thread.id}")
+    return parent_target_id, target_thread_id, None
+
+
+async def apply_thread_state(context: MigrationContext, thread, target_thread_id: str) -> None:
+    """Copies archived/locked from the source thread. Run after its messages are migrated:
+    webhook messages unarchive a thread and are rejected in a locked one."""
+    archived = bool(getattr(thread, "archived", False))
+    locked = bool(getattr(thread, "locked", False))
+    if not archived and not locked:
+        return
+    try:
+        await context.fluxer_writer.modify_thread(target_thread_id, archived=archived or None, locked=locked or None)
+    except Exception as e:
+        logger.warning(f"Could not archive/lock Fluxer thread {target_thread_id}: {e}")
+
+
+async def _sync_thread_state(context: MigrationContext, threads: list) -> tuple[int, int]:
+    """
+    Thread part of sync_channel_state: drops mappings whose Fluxer thread is gone and maps
+    unmapped threads by name under their mapped parent. Returns (updates, removals).
+    Skips entirely if Fluxer's thread lists can't be read, so no valid mapping is dropped.
+    """
+    parents = {str(context.state.get_fluxer_channel_id(str(t.parent_id))) for t in threads
+               if getattr(t, "parent_id", None) and context.state.get_fluxer_channel_id(str(t.parent_id))}
+    try:
+        target_threads = list(await context.fluxer_writer.get_active_threads())
+        channel_types = {str(c.get("id")): c.get("type") for c in await context.fluxer_writer.get_channels()}
+        for parent in parents:
+            target_threads += await context.fluxer_writer.get_archived_threads(parent)
+            if channel_types.get(parent) == 0:
+                target_threads += await context.fluxer_writer.get_archived_threads(parent, private=True)
+    except Exception as e:
+        logger.warning(f"Fluxer thread sync skipped, could not list threads: {e}")
+        return 0, 0
+
+    target_ids = {str(t.get("id")) for t in target_threads}
+    by_parent_name = {(str(t.get("parent_id")), t.get("name")): str(t.get("id")) for t in target_threads}
+    updates = removals = 0
+    for t in threads:
+        fluxer_id = context.state.get_fluxer_channel_id(str(t.id))
+        if fluxer_id:
+            if str(fluxer_id) not in target_ids:
+                context.state.remove_channel_mapping(str(t.id))
+                removals += 1
+            continue
+        parent = context.state.get_fluxer_channel_id(str(t.parent_id)) if getattr(t, "parent_id", None) else None
+        match = by_parent_name.get((str(parent), t.name)) if parent else None
+        if match:
+            context.state.set_channel_mapping(str(t.id), match)
+            updates += 1
+    return updates, removals
+
 async def sync_channel_state(context: MigrationContext):
     """
     Scans Fluxer for channels matching Discord names and updates state file mappings.
@@ -58,7 +169,12 @@ async def sync_channel_state(context: MigrationContext):
             if p_fluxer_id in fluxer_structure and ch.name in fluxer_structure[p_fluxer_id]:
                 context.state.set_channel_mapping(discord_id, fluxer_structure[p_fluxer_id][ch.name])
                 updates += 1
-    
+
+    # 3. Sync Threads (after channels, so their parents are mapped)
+    t_updates, t_removals = await _sync_thread_state(context, await context.sync_reader.get_threads(True))
+    updates += t_updates
+    removals += t_removals
+
     if updates > 0 or removals > 0:
         logger.info(f"Fluxer Channel sync: {updates} mapped, {removals} stale mappings removed")
 
@@ -73,12 +189,14 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
     # Sort by position to respect Discord arrangement
     categories = sorted(await context.sync_reader.get_categories(), key=lambda c: getattr(c, 'position', 0))
     all_channels = sorted(await context.sync_reader.get_channels(), key=lambda c: getattr(c, 'position', 0))
-    all_threads = sorted(await context.sync_reader.get_threads(True), key=lambda t: getattr(t, 'position', 0))
+    # Threads have no position; creation order (snowflake) keeps them in Discord's order
+    all_threads = sorted(await context.sync_reader.get_threads(True), key=lambda t: int(t.id))
 
     cloned_info = {
         "categories_created": [],
         "channels_created": [],
         "channels_synced": [],
+        "threads_created": [],
         "structure": {} # category_name -> [channel_names]
     }
     cat_name_map = {str(cat.id): cat.name for cat in categories}
@@ -107,7 +225,16 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
             # even if the parent category is already correct.
             channels_to_move.append((ch, fluxer_id))
 
-    total = len(missing_categories) + len(channels_to_create) + len(channels_to_move)
+    # 3. Threads. Forum/media posts are skipped here: Fluxer creates a post together with its
+    # first message, so message migration creates them (keeping the original author).
+    forum_types = {context.sync_reader.CHANNEL_TYPE_FORUM.value, 16}
+    forum_ids = {str(ch.id) for ch in all_channels
+                 if (ch.type.value if hasattr(ch.type, 'value') else ch.type) in forum_types}
+    threads_to_create = [t for t in all_threads
+                         if str(getattr(t, 'parent_id', None)) not in forum_ids
+                         and (force or not context.state.get_fluxer_channel_id(str(t.id)))]
+
+    total = len(missing_categories) + len(channels_to_create) + len(channels_to_move) + len(threads_to_create)
     current_idx = 0
     
     if total == 0:
@@ -230,5 +357,21 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
         
         current_idx += 1
         if progress_callback: await progress_callback(channel.name, "Syncing", current_idx, total)
+
+    # Create missing threads under their (now mapped) parents
+    for thread in threads_to_create:
+        if not context.is_running: break
+        try:
+            _, target_thread_id, _ = await resolve_target_thread(context, thread, force=force)
+            if target_thread_id:
+                cloned_info["threads_created"].append(thread.name)
+            else:
+                logger.warning(f"Skipping thread '{thread.name}' ({thread.id}): parent channel {getattr(thread, 'parent_id', None)} is not cloned")
+        except Exception as e:
+            # One failing thread (permissions, active thread limit) must not stop the rest
+            logger.error(f"Failed to create thread '{thread.name}' ({thread.id}): {e}")
+
+        current_idx += 1
+        if progress_callback: await progress_callback(f"Thread: {thread.name}", "Copying", current_idx, total)
 
     return cloned_info

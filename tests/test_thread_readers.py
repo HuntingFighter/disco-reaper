@@ -37,14 +37,19 @@ def reader_with_threads(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_backup_reader_get_threads_includes_archived_by_default(reader_with_threads):
-    threads = await reader_with_threads.get_threads()
+async def test_backup_reader_get_threads_includes_archived(reader_with_threads):
+    threads = await reader_with_threads.get_threads(True)
     assert sorted(t.id for t in threads) == [1001, 1002, 1003]
 
 
 @pytest.mark.asyncio
 async def test_backup_reader_get_threads_active_only(reader_with_threads):
     threads = await reader_with_threads.get_threads(include_archived=False)
+    assert [t.id for t in threads] == [1001]
+
+@pytest.mark.asyncio
+async def test_backup_reader_get_threads_active_only_by_default(reader_with_threads):
+    threads = await reader_with_threads.get_threads()
     assert [t.id for t in threads] == [1001]
 
 
@@ -74,7 +79,7 @@ async def test_discord_reader_get_threads_merges_active_and_archived():
     voice = MagicMock(spec=discord.VoiceChannel)  # voice channels are skipped
     reader = _discord_reader(active, [text, forum, voice])
 
-    threads = await reader.get_threads()
+    threads = await reader.get_threads(True)
 
     assert [t.id for t in threads] == [1, 2, 3]
     assert threads[0].name == "active"  # duplicates keep the active entry
@@ -104,6 +109,6 @@ async def test_discord_reader_get_threads_skips_forbidden_channel():
     ok.archived_threads = _archived(NS(id=5, name="archived"))
     reader = _discord_reader([], [locked, ok])
 
-    threads = await reader.get_threads()
+    threads = await reader.get_threads(True )
 
     assert [t.id for t in threads] == [5]

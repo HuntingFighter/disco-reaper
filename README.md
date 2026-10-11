@@ -40,7 +40,8 @@
 | - Threads | 🟩 | 🟩 |
 | - Forums | ⚠️ | ⚠️ |
 
-- ⚠️**Fluxer/Stoat**: Threads & Forums type channels are not yet natively available. As a workaround, threads are migrated in their parent channels as normal messages. 
+- ⚠️**Fluxer**: Threads and forum posts are migrated natively; forum tags are not copied yet.
+- ⚠️**Stoat**: Threads & Forums type channels are not available. As a workaround, threads are migrated in their parent channels as normal messages. 
 - ⚠️**Stoat**: doesn't have features like Category Permissions or Slowmode settings for channels.
 - ⏳**Stoat**: permission sync for channels was not implemented due to architectural differences.
 

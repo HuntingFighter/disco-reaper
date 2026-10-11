@@ -1281,7 +1281,7 @@ class BackupReader:
         """Uniform interface for active threads."""
         return [t for t in self.threads if not t.archived]
 
-    async def get_threads(self, include_archived: bool = True) -> List[BackupThread]:
+    async def get_threads(self, include_archived: bool = False) -> List[BackupThread]:
         """
         Uniform interface for the guild's threads (incl. forum posts).
         include_archived=False returns only active threads.
