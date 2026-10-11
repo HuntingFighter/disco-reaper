@@ -21,6 +21,8 @@ class MigrationContext:
         # If caller didn't specify, fall back to config value
         self.target_platform = target_platform or config.target_platform or "fluxer"
         self.state = MigrationState()
+        # Message migration: False skips archived threads (set per run by the UI)
+        self.include_archived_threads = True
         
         # Apply config-based log level dynamically to the root logger
         if hasattr(self.config, "log_level") and self.config.log_level:

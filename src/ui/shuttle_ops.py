@@ -24,7 +24,7 @@ from src.core.exporter import DiscordExporter
 from src.core.structure import CATEGORY, CHANNEL, THREAD, build_structure_tree, render_structure_lines
 from src.ui.modals import (
     ProgressScreen, SubMenuModal, ChannelPickerScreen, OptionSelectModal, MessageIDInputModal,
-    ChannelSelectScreen
+    ChannelSelectScreen, ArchivedThreadsModal
 )
 
 import src.fluxer.roles_permissions as fluxer_roles
@@ -570,6 +570,34 @@ class OperationPane(Container):
                     btn.display = is_backup
 
         self._update_info_labels()
+
+    # ── archived threads ─────────────────────────────────────────────────
+
+    async def _choose_thread_scope(self, channels: list) -> bool | None:
+        """
+        Decides include_archived for a migration of these source channels: True if none of them
+        has archived threads (nothing to skip), otherwise the user's choice from a popup.
+        Returns None if the user cancelled.
+        """
+        reader = self.engine.discord_reader
+        archived = []
+        for c in channels:
+            try:
+                if await reader.has_archived_threads(c.id):
+                    archived.append(c)
+            except Exception as e:
+                logger.warning(f"Could not check archived threads of {getattr(c, 'name', c.id)}: {e}")
+        if not archived:
+            return True
+
+        choice_future = asyncio.get_running_loop().create_future()
+
+        def on_choice(choice: bool | None) -> None:
+            if not choice_future.done():
+                choice_future.set_result(choice)
+
+        self.app.push_screen(ArchivedThreadsModal([c.name for c in archived]), on_choice)
+        return await choice_future
 
     # ── button routing ────────────────────────────────────────────────────
 
@@ -1127,6 +1155,7 @@ class OperationPane(Container):
     async def _logic_autotest_migrate_all_channels(self, modal: ProgressScreen) -> None:
         """Automated name-based channel migration for Auto-Test."""
         migrate_mod = fluxer_migrate if self.target_platform == "fluxer" else stoat_migrate
+        self.engine.include_archived_threads = True  # Auto-Test always covers archived threads
         
         # 1. Matching
         modal.set_status("Auto-matching channels by name...")
@@ -1267,6 +1296,12 @@ class OperationPane(Container):
                     src_id, tgt_id = res
                     source_channel = next(c for c in d_channels if c.id == src_id)
                     target_channel = next(c for c in f_channels if c.get("id") == tgt_id)
+
+                # Archived threads: ask only if the selected channel has any
+                include_archived = await self._choose_thread_scope([source_channel])
+                if include_archived is None:
+                    continue  # Cancel returns to the channel picker
+                self.engine.include_archived_threads = include_archived
 
                 # 2. Analyze
                 modal = ProgressScreen(log_level=self.config.log_level)
@@ -1681,6 +1716,18 @@ class OperationPane(Container):
                     # Skip missing channels: remove them from the active list
                     missing_ids = {str(c.id) for c in missing_channels}
                     d_channels = [c for c in d_channels if str(c.id) not in missing_ids]
+
+            # Archived threads: ask only if the migrated channels (incl. forums) have any
+            if is_autotest:
+                include_archived = True
+            else:
+                scope_channels = [c for c in d_channels if c.type != 4] + [c for c in full_d if c.type in (15, 16)]
+                include_archived = await self._choose_thread_scope(scope_channels)
+            if include_archived is None:
+                modal.dismiss()
+                await self.engine.close_connections()
+                return
+            self.engine.include_archived_threads = include_archived
             
             # 2. Resumption check
             all_mapped_tgt_ids = []

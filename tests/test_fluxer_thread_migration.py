@@ -277,3 +277,76 @@ async def test_get_channel_threads_live_includes_active_posts():
                 get_channel=AsyncMock(return_value=NS(archived_threads=archived_threads)))
 
     assert [t.id for t in await get_channel_threads(reader, 13)] == [1, 3]
+
+
+# -- "Include archived threads" option (context.include_archived_threads) --
+
+@pytest.mark.asyncio
+async def test_get_channel_threads_backup_can_skip_archived():
+    from src.fluxer.migrate_message import get_channel_threads
+    reader = NS(db=object(), threads=[_thread(1, "a", 13), _thread(2, "b", 13, archived=True), _thread(3, "c", 99)])
+
+    assert [t.id for t in await get_channel_threads(reader, 13)] == [1, 2]
+    assert [t.id for t in await get_channel_threads(reader, 13, include_archived=False)] == [1]
+
+
+@pytest.mark.asyncio
+async def test_get_channel_threads_live_active_only_skips_archive_scan():
+    from src.fluxer.migrate_message import get_channel_threads
+    reader = NS(guild=NS(active_threads=AsyncMock(return_value=[NS(id=1, parent_id=13)])),
+                get_channel=AsyncMock())
+
+    assert [t.id for t in await get_channel_threads(reader, 13, include_archived=False)] == [1]
+    reader.get_channel.assert_not_awaited()   # no per-channel archive scan
+
+
+@pytest.mark.asyncio
+async def test_active_only_run_skips_archived_thread_on_message(state):
+    old = _thread(12, "old", parent_id=11, archived=True)
+    new = _thread(14, "new", parent_id=11)
+    reader = _reader({})
+    reader.fetch_message_history = _reader({
+        11: [_msg(reader, 100, "q1", thread=old), _msg(reader, 101, "q2", thread=new)],
+        12: [_msg(reader, 200, "in old")],
+        14: [_msg(reader, 300, "in new")],
+    }).fetch_message_history
+    ctx = _context(state, reader, ["f100", "f101", "f300"])
+    ctx.include_archived_threads = False
+
+    stats = await migrate_messages(ctx, source_channel_id=11, target_channel_id="501")
+
+    assert [s["content"].splitlines()[-1] for s in _sends(ctx)] == ["q1", "q2", "in new"]
+    assert stats["threads"] == 1
+    assert not state.is_thread_completed("501", "12")   # left for a later run
+
+
+@pytest.mark.asyncio
+async def test_active_only_forum_skips_archived_posts(state):
+    posts = [_thread(30, "old", parent_id=13, archived=True), _thread(31, "new", parent_id=13)]
+    reader = _forum_reader(posts, {})
+    reader.fetch_message_history = _reader({30: [_msg(reader, 30, "old post")],
+                                            31: [_msg(reader, 31, "new post")]}).fetch_message_history
+    ctx = _context(state, reader, ["p31"])
+    ctx.include_archived_threads = False
+
+    await migrate_messages(ctx, source_channel_id=13, target_channel_id="503")
+
+    assert [s["thread_name"] for s in _sends(ctx)] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_active_only_waterfall_skips_archived_thread_messages(state):
+    state.set_channel_mapping("12", "7000")
+    old = _thread(12, "old", parent_id=11, archived=True)
+    reader = _reader({})
+    reader.fetch_global_message_history = _reader({
+        11: [_msg(reader, 100, "question", channel=NS(id=11, type=NS(value=0)))],
+        12: [_msg(reader, 200, "answer", channel=old)],
+    }).fetch_global_message_history
+    ctx = _context(state, reader, ["f100"])
+    ctx.include_archived_threads = False
+
+    stats = await migrate_global_messages(ctx)
+
+    assert [s["thread_id"] for s in _sends(ctx)] == [None]
+    assert stats["threads"] == 0

@@ -259,6 +259,18 @@ class DiscordReader:
                     logger.warning(f"403 Forbidden: Cannot fetch archived threads in {channel.name} ({channel.id})")
         return list(threads.values())
 
+    async def has_archived_threads(self, channel_id: int) -> bool:
+        """True if the channel has at least one archived public thread (one request, not a full archive scan)."""
+        channel = await self.get_channel(channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+            return False
+        try:
+            async for _ in channel.archived_threads(limit=1):
+                return True
+        except discord.Forbidden:
+            logger.warning(f"403 Forbidden: Cannot check archived threads in {channel.name} ({channel.id})")
+        return False
+
     async def fetch_channels(self) -> list[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel, discord.ForumChannel]]:
         """Async stub for discord.Guild.fetch_channels."""
         if not self.guild:

@@ -67,6 +67,7 @@ Here's complete list of everything the tool can handle and any specific caveats 
 
 ### Threads & Forums
 * 🟩 **Active & Archived Threads**: Scans and migrates messages from all threads.
+* 🟩 **Fluxer: Archived Threads Prompt**: Archived threads and forum posts are migrated too. Since that can take long on big servers, a popup asks after channel selection, only if the selected channels actually have archived threads, whether to run active threads only or active + archived threads. Skipped archived threads can be migrated in a later run.
 * 🟩 **Fluxer: Native Threads**: Threads are recreated as real threads under their parent channel, keeping the original authors. Archived and locked threads are archived/locked again once their messages are migrated.
 * 🟧 **Fluxer: Forum Posts**: Forum posts are created as real posts with their first message during message migration (not while cloning the structure). Forum tags are not copied yet.
 * 🟧 **Stoat: Thread Structure**: Stoat has no threads, so thread messages are migrated into their parent channel between thread markers.

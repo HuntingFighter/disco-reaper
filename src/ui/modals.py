@@ -460,6 +460,60 @@ class SubMenuModal(ModalScreen[str]):
 
 
 # ---------------------------------------------------------------------------
+# ArchivedThreadsModal – popup before migrating channels with archived threads
+# ---------------------------------------------------------------------------
+
+class ArchivedThreadsModal(ModalScreen[bool | None]):
+    """Popup asking whether a migration includes archived threads.
+    Returns True (active + archived), False (active only) or None (cancel)."""
+    DEFAULT_CSS = """
+    ArchivedThreadsModal { align: center middle; }
+    #archived_dialog {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        border: thick $warning;
+        padding: 1 2;
+        background: $surface;
+    }
+    #archived_title { text-style: bold; color: $warning; margin-bottom: 1; width: 100%; }
+    #archived_msg { margin-bottom: 1; width: 100%; }
+    #archived_buttons { height: auto; }
+    #archived_buttons Button { width: 1fr; margin: 0 1; }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, channel_names: list[str]):
+        super().__init__()
+        names = ", ".join(f"#{n}" for n in channel_names[:5])
+        if len(channel_names) > 5:
+            names += f" and {len(channel_names) - 5} more"
+        self._names = names
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="archived_dialog"):
+            yield Label("⚠ Archived threads found", id="archived_title")
+            yield Label(
+                f"{self._names} contain archived threads or forum posts.\n\n"
+                "Migrating them can take a long time on big servers. "
+                "Skipped archived threads can still be migrated in a later run.",
+                id="archived_msg"
+            )
+            with Horizontal(id="archived_buttons"):
+                yield Button("Active + Archived", id="btn_threads_all", variant="warning",
+                             tooltip="Migrate active and archived threads")
+                yield Button("Active Only", id="btn_threads_active", variant="primary",
+                             tooltip="Skip archived threads for now")
+                yield Button("Cancel", id="btn_threads_cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss({"btn_threads_all": True, "btn_threads_active": False}.get(event.button.id))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+# ---------------------------------------------------------------------------
 # OptionSelectModal – radio-button selection list
 # ---------------------------------------------------------------------------
 

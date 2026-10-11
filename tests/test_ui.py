@@ -162,3 +162,44 @@ async def test_ui_autotest_button(mock_configs, log):
     except Exception as e:
         log(f"test_ui_autotest_button FAILED: {e}")
         raise
+
+@pytest.mark.asyncio
+async def test_ui_archived_threads_popup(mock_configs, log):
+    """After channel selection, a popup appears only if those channels have archived threads."""
+    log("Running test_ui_archived_threads_popup")
+    from types import SimpleNamespace as NS
+    from src.ui.shuttle_ops import OperationPane
+    from src.ui.modals import ArchivedThreadsModal
+    with patch("src.ui.main_app.ConfigSelectionScreen.check_updates", AsyncMock()):
+        with patch.object(OperationPane, "run_validate", AsyncMock()):
+            app = ReaperApp()
+            async with app.run_test() as pilot:
+                await wait_for_screen(app, ConfigSelectionScreen)
+                lv = app.screen.query_one(ListView)
+                await pilot.click(next(item for item in lv.children if item.name == "AutoTest"))
+                assert await wait_for_screen(app, ModeScreen)
+
+                pane = app.screen.query_one("#pane_migrate", OperationPane)
+                assert not pane.query("#op_chk_archived")  # no checkbox any more
+                quiet, busy = NS(id=1, name="quiet"), NS(id=2, name="busy")
+                pane.engine.discord_reader = NS(has_archived_threads=AsyncMock(side_effect=lambda cid: cid == 2))
+
+                async def choose(channels, press=None):
+                    task = asyncio.create_task(pane._choose_thread_scope(channels))
+                    if press:
+                        assert await wait_for_screen(app, ArchivedThreadsModal)
+                        await pilot.pause(0.2)
+                        assert "#busy" in str(app.screen.query_one("#archived_msg", Label).content)
+                        assert "#quiet" not in str(app.screen.query_one("#archived_msg", Label).content)
+                        await pilot.press(press) if press == "escape" else app.screen.query_one(f"#{press}", Button).press()
+                    return await asyncio.wait_for(task, 5)
+
+                # No archived threads in the selection: no popup
+                assert await choose([quiet]) is True
+                assert not isinstance(app.screen, ArchivedThreadsModal)
+                # Archived threads present: popup with both choices; Cancel and Escape abort
+                assert await choose([quiet, busy], "btn_threads_active") is False
+                assert await choose([busy], "btn_threads_all") is True
+                assert await choose([busy], "btn_threads_cancel") is None
+                assert await choose([busy], "escape") is None
+                log("test_ui_archived_threads_popup PASSED")

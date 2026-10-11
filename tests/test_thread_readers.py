@@ -112,3 +112,45 @@ async def test_discord_reader_get_threads_skips_forbidden_channel():
     threads = await reader.get_threads(True )
 
     assert [t.id for t in threads] == [5]
+
+
+# --- has_archived_threads (used to decide whether to warn before a migration) ---
+
+@pytest.mark.asyncio
+async def test_backup_reader_has_archived_threads(reader_with_threads, tmp_path):
+    assert await reader_with_threads.has_archived_threads(123) is True
+    assert await reader_with_threads.has_archived_threads(999) is False
+
+    db = BackupDatabase(tmp_path / "active_only.db")
+    db._conn.execute("INSERT INTO guild_profile (id, name) VALUES (?, ?)", (1, "Guild"))
+    db._conn.commit()
+    db.save_threads([_thread_row(1001, "active-thread", 0)])
+    active_only = BackupReader(tmp_path)
+    active_only.db = db
+    assert await active_only.has_archived_threads(123) is False
+
+
+@pytest.mark.asyncio
+async def test_discord_reader_has_archived_threads_reads_one_entry():
+    calls = []
+
+    def archived(*items):
+        async def gen(limit=100):
+            calls.append(limit)
+            for item in items:
+                yield item
+        return gen
+
+    with_archive = MagicMock(spec=discord.TextChannel)
+    with_archive.archived_threads = archived(NS(id=2), NS(id=3))
+    empty = MagicMock(spec=discord.ForumChannel)
+    empty.archived_threads = archived()
+    voice = MagicMock(spec=discord.VoiceChannel)
+    reader = _discord_reader([], [])
+    channels = {1: with_archive, 2: empty, 3: voice}
+    reader.get_channel = AsyncMock(side_effect=lambda cid: channels[cid])
+
+    assert await reader.has_archived_threads(1) is True
+    assert await reader.has_archived_threads(2) is False
+    assert await reader.has_archived_threads(3) is False
+    assert calls == [1, 1]

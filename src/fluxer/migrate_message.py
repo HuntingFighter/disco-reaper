@@ -146,19 +146,24 @@ async def _is_forum_channel(context: MigrationContext, channel_id: int) -> bool:
     return raw_type in (context.discord_reader.CHANNEL_TYPE_FORUM.value, 16)
 
 
+def _skip_archived(context: MigrationContext, thread: Any) -> bool:
+    """True if thread is archived and this run migrates active threads only."""
+    return not getattr(context, "include_archived_threads", True) and bool(getattr(thread, "archived", False))
+
+
 async def _no_messages():
     return
     yield
 
 
-async def get_channel_threads(reader: Any, channel_id: int) -> List[Any]:
-    """Helper to fetch all threads (active and archived) for a channel from Live or Backup."""
+async def get_channel_threads(reader: Any, channel_id: int, include_archived: bool = True) -> List[Any]:
+    """Helper to fetch the threads of a channel from Live or Backup: active ones, plus archived ones if include_archived."""
     threads = []
     
     # 1. From Backup (BackupReader has 'db' attribute)
     if hasattr(reader, 'db') and hasattr(reader, 'threads'):
         for t in reader.threads:
-            if t.parent_id == channel_id:
+            if t.parent_id == channel_id and (include_archived or not getattr(t, 'archived', False)):
                 threads.append(t)
         return threads
 
@@ -171,8 +176,8 @@ async def get_channel_threads(reader: Any, channel_id: int) -> List[Any]:
                     if t.parent_id == channel_id:
                         threads.append(t)
             
-            # Archived threads for this specific channel
-            channel = await reader.get_channel(channel_id)
+            # Archived threads for this specific channel (the slow part on big servers)
+            channel = await reader.get_channel(channel_id) if include_archived else None
             if hasattr(channel, 'archived_threads'):
                 # discord.py method
                 async for t in channel.archived_threads(limit=None):
@@ -400,7 +405,7 @@ async def analyze_migration(context: MigrationContext, source_channel_id: int, a
             break
         
         # Count thread messages and markers even if parent is skipped
-        if hasattr(msg, 'thread') and msg.thread:
+        if hasattr(msg, 'thread') and msg.thread and not _skip_archived(context, msg.thread):
             thread = msg.thread
             if thread.id not in processed_threads:
                 processed_threads.add(thread.id)
@@ -443,7 +448,8 @@ async def analyze_migration(context: MigrationContext, source_channel_id: int, a
     # Only do this at the top level (not in recursive thread calls)
     if is_forum or after_message_id is not None or inclusive: # Usually top level calls have some start point
         # Optimization: We check all threads for the channel
-        all_threads = await get_channel_threads(context.discord_reader, source_channel_id)
+        all_threads = await get_channel_threads(context.discord_reader, source_channel_id,
+                                                include_archived=getattr(context, "include_archived_threads", True))
         for t in all_threads:
             if t.id not in processed_threads:
                 processed_threads.add(t.id)
@@ -540,7 +546,9 @@ async def migrate_messages(
         if not context.is_running:
             return
         logger.info(f"Checking for missed or pending threads in channel {source_channel_id}...")
-        all_threads = sorted(await get_channel_threads(context.discord_reader, source_channel_id), key=lambda t: int(t.id))
+        all_threads = sorted(await get_channel_threads(context.discord_reader, source_channel_id,
+                                                       include_archived=getattr(context, "include_archived_threads", True)),
+                             key=lambda t: int(t.id))
         for t in all_threads:
             if not context.is_running:
                 break
@@ -612,7 +620,7 @@ async def migrate_messages(
                 context.discord_reader.MESSAGE_TYPE_AUTO_MODERATION_ACTION
             ]:
                 # If we are skipping the parent, we STILL need to check for a thread!
-                if hasattr(msg, 'thread') and msg.thread:
+                if hasattr(msg, 'thread') and msg.thread and not _skip_archived(context, msg.thread):
                     thread = msg.thread
                     if thread.id not in processed_threads:
                         processed_threads.add(thread.id)
@@ -817,7 +825,7 @@ async def migrate_messages(
                 )
 
                 # Check for associated thread (Individual mode recursion)
-                if hasattr(msg, 'thread') and msg.thread:
+                if hasattr(msg, 'thread') and msg.thread and not _skip_archived(context, msg.thread):
                     thread = msg.thread
                     if thread.id not in processed_threads:
                         processed_threads.add(thread.id)
@@ -889,6 +897,8 @@ async def analyze_global_migration(context: MigrationContext, after_message_id: 
             
         # Determine target channel to check for existing mapping
         if not msg.channel:
+            continue
+        if _source_thread_parent_id(msg.channel) and _skip_archived(context, msg.channel):
             continue
             
         target_channel_id = context.state.get_target_channel_id(str(msg.channel.id))
@@ -980,6 +990,8 @@ async def migrate_global_messages(
             # Thread messages go into the Fluxer thread via its parent channel (which owns the webhook)
             parent_src_id = _source_thread_parent_id(msg.channel)
             if parent_src_id:
+                if _skip_archived(context, msg.channel):
+                    continue
                 target_channel_id = context.state.get_target_channel_id(parent_src_id)
                 if not target_channel_id:
                     continue

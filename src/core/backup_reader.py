@@ -1291,6 +1291,10 @@ class BackupReader:
             return list(self.threads)
         return await self.get_active_threads()
 
+    async def has_archived_threads(self, channel_id: int) -> bool:
+        """True if the backup holds at least one archived thread of the channel."""
+        return any(t.parent_id == channel_id and t.archived for t in self.threads)
+
     async def get_backed_up_channel_ids(self) -> List[int]:
         """Returns a list of channel IDs that have messages in the database."""
         if not self.db: return []
