@@ -154,3 +154,31 @@ async def test_discord_reader_has_archived_threads_reads_one_entry():
     assert await reader.has_archived_threads(2) is False
     assert await reader.has_archived_threads(3) is False
     assert calls == [1, 1]
+
+
+# --- channel_exists (deleted-on-Discord detection: only a 404 counts as deleted) ---
+
+@pytest.mark.asyncio
+async def test_discord_reader_channel_exists():
+    def http_error(cls, status):
+        return cls(MagicMock(status=status, reason="x"), {"message": "x", "code": 0})
+
+    reader = _discord_reader([], [])
+    results = {1: NS(id=1), 2: http_error(discord.NotFound, 404), 3: http_error(discord.Forbidden, 403)}
+
+    async def fetch(cid):
+        r = results[cid]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    reader.client = MagicMock(fetch_channel=AsyncMock(side_effect=fetch))
+    assert await reader.channel_exists(1) is True
+    assert await reader.channel_exists(2) is False
+    assert await reader.channel_exists(3) is None
+
+
+@pytest.mark.asyncio
+async def test_backup_reader_channel_exists_never_reports_deleted(reader_with_threads):
+    assert await reader_with_threads.channel_exists(1001) is True
+    assert await reader_with_threads.channel_exists(424242) is None

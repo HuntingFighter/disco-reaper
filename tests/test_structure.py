@@ -83,8 +83,22 @@ def test_render_lines(tree):
         "      - 🧵 first",
         "      - 🧵 second",
         "    - # memes",
-        "  [bold yellow]📁 Voice[/bold yellow]",
+        "  [bold]📁 Voice[/bold]",
         "    - # Lobby",
+    ]
+
+
+def test_render_marks_changed_items_orange():
+    changed = build_structure_tree(
+        categories=[cat(1, "Text")],
+        channels=[chan(11, "general", category_id=1), chan(12, "memes", category_id=1)],
+        is_mapped=lambda kind, item_id: True,
+        is_changed=lambda kind, item_id: item_id in {1, 12},
+    )
+    assert render_structure_lines(changed) == [
+        "  [orange1]📁 Text[/orange1]",
+        "    - [green]# general[/green]",
+        "    - [orange1]# memes[/orange1]",
     ]
 
 
@@ -115,11 +129,12 @@ async def test_clone_preview_builds_tree_and_matches_int_mapping_keys():
     )
     # Fluxer's migration DB returns int keys
     state = NS(channel_map={11: 500}, category_map={1: 400}, role_map={7: 600})
-    me = NS(engine=NS(sync_reader=reader, state=state))
+    me = NS(engine=NS(sync_reader=reader, state=state), target_platform="stoat")
 
     preview = await OperationPane._fetch_clone_preview(me, ["sub_clone_roles", "sub_clone_channels"])
 
     assert preview["roles"] == [("Mods", True)]
+    reader.get_threads.assert_awaited_once_with(True)  # archived threads/forum posts included
     root = preview["structure"]
     assert shape(root) == (ROOT, "root", [
         (CATEGORY, "Text", [(CHANNEL, "general", [(THREAD, "first", [])])]),
@@ -137,8 +152,95 @@ async def test_clone_preview_without_threads_when_fetch_fails():
         get_channels=AsyncMock(return_value=[chan(11, "general")]),
         get_threads=AsyncMock(side_effect=RuntimeError("boom")),
     )
-    me = NS(engine=NS(sync_reader=reader, state=NS(channel_map={}, category_map={}, role_map={})))
+    me = NS(engine=NS(sync_reader=reader, state=NS(channel_map={}, category_map={}, role_map={})), target_platform="stoat")
 
     preview = await OperationPane._fetch_clone_preview(me, ["sub_clone_channels"])
 
     assert shape(preview["structure"]) == (ROOT, "root", [(CHANNEL, "general", [])])
+
+
+@pytest.mark.asyncio
+async def test_clone_preview_marks_renamed_channels_on_fluxer(monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.ui.shuttle_ops import OperationPane
+    import src.fluxer.clone_server as clone_server
+
+    reader = NS(
+        get_categories=AsyncMock(return_value=[cat(1, "Text")]),
+        get_channels=AsyncMock(return_value=[chan(11, "general", category_id=1), chan(12, "memes", category_id=1)]),
+        get_threads=AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(clone_server, "find_changed_channels", AsyncMock(return_value={"12"}))
+    state = NS(channel_map={11: 500, 12: 501}, category_map={1: 400}, role_map={})
+    me = NS(engine=NS(sync_reader=reader, state=state), target_platform="fluxer")
+
+    preview = await OperationPane._fetch_clone_preview(me, ["sub_clone_channels"])
+
+    assert {n.name for n in preview["structure"].walk() if n.changed} == {"memes"}
+
+
+def test_forum_posts_are_hidden_with_a_note():
+    forum = NS(id=1, name="ideas", category_id=None, position=0, type=NS(value=15))
+    media = NS(id=2, name="gallery", category_id=None, position=1, type=16)
+    tree = build_structure_tree(
+        channels=[forum, media, chan(3, "general", position=2)],
+        threads=[thread(10, "post a", parent_id=1), thread(11, "post b", parent_id=1), thread(12, "chat", parent_id=3)],
+    )
+    assert tree.count(THREAD) == 1
+    assert render_structure_lines(tree) == [
+        "  - # ideas",
+        "    [dim]2 forum posts, only created when migrating messages (renamed posts are updated here)[/dim]",
+        "  - # gallery",
+        "    [dim]Forum posts are only created when migrating messages (renamed posts are updated here)[/dim]",
+        "  - # general",
+        "    - 🧵 chat",
+    ]
+
+
+def test_deleted_items_are_red_always_listed_and_counted_apart():
+    forum = NS(id=1, name="ideas", category_id=None, position=0, type=15)
+    tree = build_structure_tree(
+        categories=[cat(5, "Old", position=1)],
+        channels=[forum, chan(6, "gone", category_id=5)],
+        threads=[thread(10, "live post", parent_id=1), thread(11, "dead post", parent_id=1)],
+        is_mapped=lambda kind, item_id: True,
+        is_deleted=lambda kind, item_id: item_id in {5, 6, 11},
+    )
+    assert render_structure_lines(tree, max_threads=0) == [
+        "  - [green]# ideas[/green]",
+        "    [dim]1 forum posts, only created when migrating messages (renamed posts are updated here)[/dim]",
+        "    - [red]🧵 dead post[/red]",
+        "  [red]📁 Old[/red]",
+        "    - [red]# gone[/red]",
+    ]
+    assert (tree.count(CATEGORY), tree.count(CHANNEL), tree.count(THREAD)) == (0, 1, 0)
+    assert (tree.count(CATEGORY, deleted=True), tree.count(CHANNEL, deleted=True), tree.count(THREAD, deleted=True)) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_clone_preview_places_deleted_channels_under_their_old_parent(monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.ui.shuttle_ops import OperationPane
+    import src.fluxer.clone_server as clone_server
+
+    reader = NS(
+        get_categories=AsyncMock(return_value=[cat(1, "Text")]),
+        get_channels=AsyncMock(return_value=[chan(11, "general", category_id=1)]),
+        get_threads=AsyncMock(return_value=[]),
+    )
+    gone = [{"discord_id": "12", "target_id": "502", "kind": "channel", "name": "old", "type": 0,
+             "category_id": "1", "parent_id": None, "position": 1},
+            {"discord_id": "13", "target_id": "503", "kind": "thread", "name": "old thread", "type": 11,
+             "category_id": None, "parent_id": "11", "position": 0}]
+    monkeypatch.setattr(clone_server, "find_changed_channels", AsyncMock(return_value=set()))
+    monkeypatch.setattr(clone_server, "find_deleted_channels", AsyncMock(return_value=gone))
+    state = NS(channel_map={11: 500, 12: 502, 13: 503}, category_map={1: 400}, role_map={})
+    me = NS(engine=NS(sync_reader=reader, state=state), target_platform="fluxer")
+
+    preview = await OperationPane._fetch_clone_preview(me, ["sub_clone_channels"])
+
+    assert preview["deleted"] == gone
+    assert shape(preview["structure"]) == (ROOT, "root", [
+        (CATEGORY, "Text", [(CHANNEL, "general", [(THREAD, "old thread", [])]), (CHANNEL, "old", [])]),
+    ])
+    assert {n.name for n in preview["structure"].walk() if n.deleted} == {"old", "old thread"}

@@ -281,6 +281,20 @@ class DiscordReader:
         """Returns a channel object."""
         return await self.client.fetch_channel(channel_id)
 
+    async def channel_exists(self, channel_id: int) -> bool | None:
+        """
+        True if the channel/thread still exists on Discord, False if Discord answers 404 (deleted),
+        None if that can't be told (no access, other errors). Callers only treat False as deleted.
+        """
+        try:
+            await self.client.fetch_channel(int(channel_id))
+            return True
+        except discord.NotFound:
+            return False
+        except Exception as e:
+            logger.debug(f"Could not check whether channel {channel_id} exists: {e}")
+            return None
+
     async def get_message(self, channel_id: int, message_id: int):
         """Returns a specific message."""
         channel = await self.get_channel(channel_id)

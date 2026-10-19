@@ -8,6 +8,77 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DISCORD_EPOCH_MS = 1420070400000
+
+
+def _plain(value: Any) -> Any:
+    """Enum -> value, bool -> int, datetime -> ISO string, flags object -> int."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return int(value)  # also IntEnum (e.g. ChannelType)
+    if isinstance(value, str):
+        return str(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if hasattr(value, "value"):
+        return _plain(value.value)
+    return str(value)
+
+
+def _tag_id(tag: Any) -> str:
+    return str(getattr(tag, "id", tag))
+
+
+def _read_attr(obj: Any, attr: str) -> Any:
+    """getattr(obj, attr, None) that also survives properties raising: discord.Thread.category_id raises
+    ClientException when the parent channel isn't in discord.py's cache, which DiscordReader (REST only) never fills."""
+    try:
+        return getattr(obj, attr, None)
+    except Exception:
+        return None
+
+
+def channel_record(channel: Any) -> Dict[str, Any]:
+    """
+    Discord data of a category, channel or thread for channel_mappings (no permissions/overwrites).
+    Works on discord.py objects and the backup stand-ins (missing attributes become NULL).
+    """
+    from datetime import datetime, timezone
+    cid = int(channel.id)
+    record: Dict[str, Any] = {"discord_channel_id": str(cid)}
+    for attr in ("name", "type", "position", "category_id", "parent_id", "topic", "nsfw", "slowmode_delay",
+                 "bitrate", "user_limit", "rtc_region", "video_quality_mode", "flags",
+                 "default_auto_archive_duration", "default_thread_slowmode_delay", "default_sort_order",
+                 "default_layout", "archived", "locked", "invitable", "auto_archive_duration",
+                 "archive_timestamp", "owner_id", "message_count"):
+        record[attr] = _plain(_read_attr(channel, attr))
+    # A thread's parent_id is its channel; a channel's category is category_id, not parent
+    if record["type"] not in (10, 11, 12):
+        record["parent_id"] = None
+
+    tags = getattr(channel, "available_tags", None)
+    if tags:
+        record["available_tags"] = json.dumps([{
+            "id": _tag_id(t), "name": getattr(t, "name", None), "moderated": bool(getattr(t, "moderated", False)),
+            "emoji_id": str(t.emoji.id) if getattr(getattr(t, "emoji", None), "id", None) else None,
+            "emoji_name": getattr(getattr(t, "emoji", None), "name", None),
+        } for t in tags])
+    emoji = getattr(channel, "default_reaction_emoji", None)
+    if emoji:
+        record["default_reaction_emoji"] = json.dumps({"id": str(emoji.id) if getattr(emoji, "id", None) else None,
+                                                       "name": getattr(emoji, "name", None)})
+    applied = getattr(channel, "applied_tags", None)
+    if applied:
+        record["applied_tags"] = json.dumps([_tag_id(t) for t in applied])
+
+    record["created_at"] = datetime.fromtimestamp(((cid >> 22) + DISCORD_EPOCH_MS) / 1000, tz=timezone.utc).isoformat()
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return record
+
+
 class MigrationState:
     """Manages persistence of the migration state to allow resumability.
     Uses SQLite for ALL mappings and metadata.
@@ -28,6 +99,7 @@ class MigrationState:
         """Maps an original text/voice/forum channel ID to a minted server channel ID."""
         if self.db:
             self.db.set_server_mapping("channel", str(discord_id), str(target_id))
+            self.db.set_channel_record_target(str(discord_id), str(target_id))
             
     def get_target_channel_id(self, discord_id: int | str) -> str | None:
         if self.db:
@@ -37,10 +109,10 @@ class MigrationState:
     def remove_channel_mapping(self, discord_id: int | str):
         if self.db:
             self.db.delete_server_mapping("channel", str(discord_id))
+            self.db.set_channel_record_target(str(discord_id), None)
 
     def remove_target_channel_mapping(self, discord_id: int | str):
-        if self.db:
-            self.db.delete_server_mapping("channel", str(discord_id))
+        self.remove_channel_mapping(discord_id)
     
     def set_target_channel_id(self, discord_id: int | str, target_id: str, *args):
         """Alias for set_channel_mapping to handle legacy calls."""
@@ -54,6 +126,7 @@ class MigrationState:
         """Maps an original discord category ID to a Stoat category Group ID."""
         if self.db:
             self.db.set_server_mapping("category", str(discord_id), str(target_id))
+            self.db.set_channel_record_target(str(discord_id), str(target_id))
             
     def get_category_mapping(self, discord_id: int | str) -> str | None:
         """Returns the Stoat Group ID for a previously migrated category."""
@@ -64,6 +137,7 @@ class MigrationState:
     def remove_category_mapping(self, discord_id: int | str):
         if self.db:
             self.db.delete_server_mapping("category", str(discord_id))
+            self.db.set_channel_record_target(str(discord_id), None)
     
     def set_target_category_id(self, discord_id: int | str, target_id: str, *args):
         """Alias for set_category_mapping to handle legacy calls."""
@@ -72,6 +146,26 @@ class MigrationState:
     get_fluxer_category_id = get_category_mapping
     get_target_category_id = get_category_mapping
     set_target_category_mapping = set_category_mapping
+
+    # --- Channel Records (Discord channel data + target channel ID, see channel_mappings) ---
+    def record_source_channels(self, channels) -> None:
+        """Stores/refreshes the Discord data of categories, channels and threads. Keeps their target IDs."""
+        if not self.db:
+            return
+        for channel in channels:
+            try:
+                self.db.upsert_channel_record(channel_record(channel))
+            except Exception as e:
+                logger.warning(f"Could not record channel {getattr(channel, 'id', '?')}: {e}")
+
+    def get_channel_record(self, discord_id: int | str) -> Dict[str, Any] | None:
+        return self.db.get_channel_record(str(discord_id)) if self.db else None
+
+    def get_all_channel_records(self) -> list[Dict[str, Any]]:
+        return self.db.get_all_channel_records() if self.db else []
+
+    def find_channel_record_by_target(self, target_id: int | str) -> Dict[str, Any] | None:
+        return self.db.find_channel_record_by_target(str(target_id)) if self.db else None
 
     # --- Role Mapping ---
     def set_role_mapping(self, discord_id: int | str, target_id: str):
@@ -275,6 +369,7 @@ class MigrationState:
         if self.db:
             self.db.clear_server_mappings("channel")
             self.db.clear_server_mappings("category")
+            self.db.clear_channel_record_targets()
 
     def clear_role_mappings(self):
         if self.db:

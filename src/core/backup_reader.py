@@ -1309,6 +1309,10 @@ class BackupReader:
                 return t
         return None
 
+    async def channel_exists(self, channel_id: int) -> bool | None:
+        """True if the backup has the channel/thread, else None: a backup can't tell whether Discord deleted it."""
+        return True if await self.get_channel(int(channel_id)) else None
+
     # ── roles, emojis, stickers, members ─────────────────────────────────
 
     async def get_roles(self) -> List[BackupRole]:

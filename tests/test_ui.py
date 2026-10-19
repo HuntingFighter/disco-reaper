@@ -203,3 +203,40 @@ async def test_ui_archived_threads_popup(mock_configs, log):
                 assert await choose([busy], "btn_threads_cancel") is None
                 assert await choose([busy], "escape") is None
                 log("test_ui_archived_threads_popup PASSED")
+
+
+@pytest.mark.asyncio
+async def test_ui_deleted_channels_confirmation(mock_configs, log):
+    """Channels deleted on Discord are only deleted on the target after the dedicated confirmation."""
+    log("Running test_ui_deleted_channels_confirmation")
+    from src.ui.shuttle_ops import OperationPane
+    from src.ui.modals import DeletedChannelsModal
+    import src.fluxer.danger_zone as danger_zone
+    items = [{"discord_id": "12", "target_id": "502", "kind": "channel", "name": "old-chan"}]
+    with patch("src.ui.main_app.ConfigSelectionScreen.check_updates", AsyncMock()):
+        with patch.object(OperationPane, "run_validate", AsyncMock()):
+            app = ReaperApp()
+            async with app.run_test() as pilot:
+                await wait_for_screen(app, ConfigSelectionScreen)
+                lv = app.screen.query_one(ListView)
+                await pilot.click(next(item for item in lv.children if item.name == "AutoTest"))
+                assert await wait_for_screen(app, ModeScreen)
+                pane = app.screen.query_one("#pane_migrate", OperationPane)
+                pane.engine.writer = MagicMock(validate=AsyncMock(return_value={"community_name": "Target"}))
+                modal = MagicMock()
+
+                with patch.object(danger_zone, "danger_delete_removed_channels", AsyncMock(return_value=1)) as delete, \
+                        patch("src.ui.shuttle_ops.log_audit_event", AsyncMock()):
+                    async def run(press):
+                        task = asyncio.create_task(pane._logic_delete_removed_channels(modal, items))
+                        assert await wait_for_screen(app, DeletedChannelsModal)
+                        await pilot.pause(0.2)
+                        await pilot.press(press) if press == "escape" else app.screen.query_one(f"#{press}", Button).press()
+                        return await asyncio.wait_for(task, 5)
+
+                    assert await run("btn_deleted_keep") is None
+                    assert await run("escape") is None
+                    delete.assert_not_called()
+                    assert await run("btn_deleted_delete") == 1
+                    delete.assert_awaited_once()
+                log("test_ui_deleted_channels_confirmation PASSED")

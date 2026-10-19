@@ -16,6 +16,8 @@ THREAD = "thread"
 # each group by position, then id (threads have no position, so they end up in creation order).
 _KIND_ORDER = {CHANNEL: 0, THREAD: 0, CATEGORY: 1}
 _ICONS = {CATEGORY: "📁", CHANNEL: "#", THREAD: "🧵"}
+# Discord forum and media channels: their posts are created and synced during message migration, not cloning
+FORUM_CHANNEL_TYPES = {15, 16}
 
 
 @dataclass
@@ -24,7 +26,10 @@ class StructureNode:
     name: str
     id: Optional[int] = None
     exists: bool = False
+    changed: bool = False  # exists, but renamed or moved on the source since it was cloned
+    deleted: bool = False  # migrated before, deleted on the source since (its target copy still exists)
     position: int = 0
+    note: Optional[str] = None  # dim line shown under the node
     children: List["StructureNode"] = field(default_factory=list)
 
     def walk(self) -> Iterator["StructureNode"]:
@@ -33,8 +38,14 @@ class StructureNode:
         for child in self.children:
             yield from child.walk()
 
-    def count(self, kind: str) -> int:
-        return sum(1 for node in self.walk() if node.kind == kind)
+    def count(self, kind: str, deleted: bool = False) -> int:
+        """Number of nodes of a kind; deleted=True counts the deleted ones instead of the live ones."""
+        return sum(1 for node in self.walk() if node.kind == kind and node.deleted == deleted)
+
+
+def _raw_type(item) -> Optional[int]:
+    t = getattr(item, "type", None)
+    return getattr(t, "value", t)
 
 
 def _parent_of(kind: str, item) -> Optional[int]:
@@ -51,11 +62,17 @@ def build_structure_tree(
     channels: Iterable = (),
     threads: Iterable = (),
     is_mapped: Callable[[str, int], bool] = lambda kind, item_id: False,
+    is_changed: Callable[[str, int], bool] = lambda kind, item_id: False,
+    is_deleted: Callable[[str, int], bool] = lambda kind, item_id: False,
 ) -> StructureNode:
     """
     Builds the tree recursively: every item becomes a child of the item whose id is its parent id.
     Items without a parent, or whose parent is not in the input (e.g. a thread of a skipped channel),
-    are attached to the root. is_mapped(kind, id) marks nodes that already exist on the target.
+    are attached to the root. is_mapped(kind, id) marks nodes that already exist on the target,
+    is_changed(kind, id) existing nodes that were renamed or moved since, is_deleted(kind, id) items that
+    were deleted on the source (pass them in with their last known parent).
+    Posts of forum/media channels are left out (cloning doesn't sync them), except deleted ones; the forum
+    gets a note instead.
     """
     items = [(CATEGORY, c) for c in categories] + [(CHANNEL, c) for c in channels] + [(THREAD, t) for t in threads]
     known_ids = {item.id for _, item in items}
@@ -76,13 +93,23 @@ def build_structure_tree(
         for kind, item in sorted(by_parent.get(parent_id, []), key=sort_key):
             if item.id in seen:  # guards against malformed parent cycles
                 continue
+            children = make_children(item.id, seen | {item.id})
+            note = None
+            if kind == CHANNEL and _raw_type(item) in FORUM_CHANNEL_TYPES:
+                posts = sum(1 for c in children if c.kind == THREAD and not c.deleted)
+                children = [c for c in children if c.kind != THREAD or c.deleted]
+                note = (f"{posts} forum posts, " if posts else "Forum posts are ") + \
+                    "only created when migrating messages (renamed posts are updated here)"
             nodes.append(StructureNode(
                 kind=kind,
                 name=item.name,
                 id=item.id,
                 exists=is_mapped(kind, item.id),
+                changed=is_changed(kind, item.id),
+                deleted=is_deleted(kind, item.id),
                 position=getattr(item, "position", 0) or 0,
-                children=make_children(item.id, seen | {item.id}),
+                note=note,
+                children=children,
             ))
         return nodes
 
@@ -92,27 +119,35 @@ def build_structure_tree(
 def render_structure_lines(node: StructureNode, depth: int = 1, max_threads: int = 10) -> List[str]:
     """
     Renders the tree recursively as Rich-markup lines for the clone preview. Existing items are green,
-    new categories bold yellow. At most max_threads threads are listed per parent.
+    existing items that were renamed or moved orange (the clone updates them), items deleted on the
+    source red, new categories bold.
+    At most max_threads threads are listed per parent.
     """
     lines: List[str] = []
     indent = "  " * depth
     shown_threads = 0
     hidden_threads = 0
     for child in node.children:
-        if child.kind == THREAD:
+        if child.kind == THREAD and not child.deleted:  # deleted threads are always listed
             if shown_threads >= max_threads:
                 hidden_threads += 1
                 continue
             shown_threads += 1
 
         icon = _ICONS.get(child.kind, "-")
+        if child.deleted:
+            color = "red"
+        else:
+            color = ("orange1" if child.changed else "green") if child.exists else None
         if child.kind == CATEGORY:
-            color = "green" if child.exists else "bold yellow"
+            color = color or "bold"
             lines.append(f"{indent}[{color}]{icon} {child.name}[/{color}]")
-        elif child.exists:
-            lines.append(f"{indent}- [green]{icon} {child.name}[/green]")
+        elif color:
+            lines.append(f"{indent}- [{color}]{icon} {child.name}[/{color}]")
         else:
             lines.append(f"{indent}- {icon} {child.name}")
+        if child.note:
+            lines.append(f"{indent}  [dim]{child.note}[/dim]")
         lines.extend(render_structure_lines(child, depth + 1, max_threads))
 
     if hidden_threads:

@@ -11,6 +11,48 @@ from src.core.utils import parse_snowflake
 
 logger = logging.getLogger(__name__)
 
+# Discord data columns of channel_mappings (everything except permissions/overwrites).
+# Categories, channels and threads are all Discord channels and share this table.
+CHANNEL_RECORD_COLUMNS = {
+    "name": "TEXT",
+    "type": "INTEGER",
+    "position": "INTEGER",
+    "category_id": "INTEGER",             # channels: their category
+    "parent_id": "INTEGER",               # threads/forum posts: their parent channel
+    "topic": "TEXT",
+    "nsfw": "INTEGER",
+    "slowmode_delay": "INTEGER",
+    "bitrate": "INTEGER",
+    "user_limit": "INTEGER",
+    "rtc_region": "TEXT",
+    "video_quality_mode": "INTEGER",
+    "flags": "INTEGER",
+    "default_auto_archive_duration": "INTEGER",
+    "default_thread_slowmode_delay": "INTEGER",
+    "available_tags": "TEXT",             # forums: JSON list of tag definitions
+    "default_reaction_emoji": "TEXT",     # forums: JSON {id, name}
+    "default_sort_order": "INTEGER",
+    "default_layout": "INTEGER",
+    "archived": "INTEGER",                # threads
+    "locked": "INTEGER",
+    "invitable": "INTEGER",
+    "auto_archive_duration": "INTEGER",
+    "archive_timestamp": "TEXT",
+    "applied_tags": "TEXT",               # threads in forums: JSON list of tag IDs
+    "owner_id": "INTEGER",
+    "message_count": "INTEGER",
+    "created_at": "TEXT",
+    "updated_at": "TEXT",                 # when this row's Discord data was last recorded
+}
+
+
+def _channel_mappings_sql(source_type: str, target_type: str) -> str:
+    cols = ",\n".join(f"    {name} {ctype}" for name, ctype in CHANNEL_RECORD_COLUMNS.items())
+    return (f"CREATE TABLE IF NOT EXISTS channel_mappings (\n"
+            f"    discord_channel_id {source_type} PRIMARY KEY,\n"
+            f"    target_channel_id {target_type},\n{cols}\n)")
+
+
 class MigrationDatabase:
     """
     SQLite-based persistence for large-scale migration mappings and stats.
@@ -65,7 +107,8 @@ class MigrationDatabase:
             "thread_tracking": ([], ["channel_id", "thread_id", "last_msg_id"]),
             "server_mappings": (["source_id"], ["target_id"]),
             "asset_mappings": (["source_id"], ["target_id"]),
-            "user_alias": (["user_id"], [])
+            "user_alias": (["user_id"], []),
+            "channel_mappings": (["discord_channel_id"], ["target_channel_id"]),
         }
 
         for table, (discord_cols, target_cols) in id_migrations.items():
@@ -104,6 +147,8 @@ class MigrationDatabase:
                     cursor.execute(f"CREATE TABLE asset_mappings (category TEXT, source_id {source_type}, target_id {target_type}, PRIMARY KEY (category, source_id))")
                 elif table == "user_alias":
                     cursor.execute(f"CREATE TABLE user_alias (user_id {source_type} PRIMARY KEY, alias TEXT UNIQUE)")
+                elif table == "channel_mappings":
+                    cursor.execute(_channel_mappings_sql(source_type, target_type))
                 
                 old_cols = [c[1] for c in cursor.execute(f"PRAGMA table_info({table}_old)").fetchall()]
                 new_cols = [c[1] for c in cursor.execute(f"PRAGMA table_info({table})").fetchall()]
@@ -216,6 +261,19 @@ class MigrationDatabase:
             )
         """)
         
+        # Discord channel data + target channel ID (NULL until the channel exists on the target)
+        cursor.execute(_channel_mappings_sql(source_type, target_type))
+        existing_cols = {c[1] for c in cursor.execute("PRAGMA table_info(channel_mappings)").fetchall()}
+        for name, ctype in CHANNEL_RECORD_COLUMNS.items():
+            if name not in existing_cols:
+                cursor.execute(f"ALTER TABLE channel_mappings ADD COLUMN {name} {ctype}")
+        # Existing databases: carry over the channel/category/thread mappings made before this table existed
+        cursor.execute("""
+            INSERT OR IGNORE INTO channel_mappings (discord_channel_id, target_channel_id)
+            SELECT source_id, target_id FROM server_mappings WHERE category IN ('channel', 'category')
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_mappings_target ON channel_mappings (target_channel_id)")
+
         # Indexes for fast lookup by source message ID
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_message_mappings_source ON message_mappings (source_msg_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_mappings_source ON thread_mappings (source_msg_id)")
@@ -367,6 +425,60 @@ class MigrationDatabase:
         else:
             conn.execute("DELETE FROM server_mappings")
         conn.commit()
+
+    # --- Channel Mapping Records (Discord channel data + target channel ID) ---
+
+    def upsert_channel_record(self, record: Dict[str, Any]):
+        """Inserts or refreshes the Discord data of a channel. Never touches target_channel_id."""
+        data = {k: v for k, v in record.items() if k in CHANNEL_RECORD_COLUMNS}
+        cols = ", ".join(data)
+        marks = ", ".join("?" for _ in data)
+        updates = ", ".join(f"{k} = excluded.{k}" for k in data)
+        conn = self._get_conn()
+        conn.execute(
+            f"INSERT INTO channel_mappings (discord_channel_id, {cols}) VALUES (?, {marks}) "
+            f"ON CONFLICT(discord_channel_id) DO UPDATE SET {updates}",
+            (parse_snowflake(record["discord_channel_id"]), *data.values())
+        )
+        conn.commit()
+
+    def set_channel_record_target(self, discord_channel_id: str, target_channel_id: Optional[str]):
+        """Sets (or with None clears) the target channel ID; creates a bare row if the channel isn't recorded yet."""
+        target = str(target_channel_id) if target_channel_id is not None else None
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO channel_mappings (discord_channel_id, target_channel_id) VALUES (?, ?) "
+            "ON CONFLICT(discord_channel_id) DO UPDATE SET target_channel_id = excluded.target_channel_id",
+            (parse_snowflake(discord_channel_id), target)
+        )
+        conn.commit()
+
+    def clear_channel_record_targets(self):
+        conn = self._get_conn()
+        conn.execute("UPDATE channel_mappings SET target_channel_id = NULL")
+        conn.commit()
+
+    def _channel_record_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        record = dict(row)
+        if self.platform == "stoat" and record.get("target_channel_id") is not None:
+            record["target_channel_id"] = str(record["target_channel_id"])
+        return record
+
+    def get_channel_record(self, discord_channel_id: str) -> Optional[Dict[str, Any]]:
+        row = self._get_conn().execute(
+            "SELECT * FROM channel_mappings WHERE discord_channel_id = ?", (parse_snowflake(discord_channel_id),)
+        ).fetchone()
+        return self._channel_record_row(row) if row else None
+
+    def get_all_channel_records(self) -> List[Dict[str, Any]]:
+        rows = self._get_conn().execute("SELECT * FROM channel_mappings ORDER BY discord_channel_id").fetchall()
+        return [self._channel_record_row(r) for r in rows]
+
+    def find_channel_record_by_target(self, target_channel_id: str) -> Optional[Dict[str, Any]]:
+        row = self._get_conn().execute(
+            "SELECT * FROM channel_mappings WHERE target_channel_id = ?", (str(target_channel_id),)
+        ).fetchone()
+        return self._channel_record_row(row) if row else None
 
     # --- Asset Mapping Methods ---
 

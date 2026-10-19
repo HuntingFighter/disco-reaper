@@ -265,3 +265,53 @@ async def test_real_client_create_thread_and_forum_post_with_files(local_api):
     payload = json.loads(parts["payload_json"][1])
     assert payload["thread_name"] == "Bug report"
     assert payload["attachments"] == [{"id": 0, "filename": "a.txt"}]
+
+
+# --- Channel reorder route (no fluxer.py method either) ---
+
+@pytest.mark.asyncio
+async def test_reorder_channels_patches_guild_channels(writer):
+    writer.client.request = AsyncMock(return_value=None)
+    writer._channels_cache = [{"id": "1"}]
+    entries = [{"id": "5", "preceding_sibling_id": None, "parent_id": None}]
+
+    await writer.reorder_channels(entries)
+
+    method, url, kwargs = call(writer)
+    assert (method, url) == ("PATCH", f"{API}/guilds/1/channels")
+    assert kwargs["json"] == entries
+    assert writer._channels_cache is None
+
+
+@pytest.mark.asyncio
+async def test_reorder_channels_retries_while_hierarchy_locked(writer):
+    from fluxer import HTTPException
+    locked = HTTPException(status=423, code="GENERAL_ERROR", message="locked")
+    writer.client.request = AsyncMock(side_effect=[locked, None])
+
+    await writer.reorder_channels([{"id": "5", "preceding_sibling_id": None}])
+
+    assert writer.client.request.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reorder_channels_skips_empty_and_raises_other_errors(writer):
+    from fluxer import HTTPException
+    writer.client.request = AsyncMock(side_effect=HTTPException(status=400, code="INVALID_FORM_BODY", message="bad"))
+
+    await writer.reorder_channels([])
+    writer.client.request.assert_not_called()
+    with pytest.raises(HTTPException):
+        await writer.reorder_channels([{"id": "5", "preceding_sibling_id": None}])
+
+
+@pytest.mark.asyncio
+async def test_delete_channel_reports_already_deleted(writer):
+    from fluxer import HTTPException
+    writer.client.delete_channel = AsyncMock(side_effect=[None, HTTPException(status=404, code="UNKNOWN_CHANNEL", message="x"),
+                                                          HTTPException(status=403, code="MISSING_PERMISSIONS", message="x")])
+
+    assert await writer.delete_channel("5") is True
+    assert await writer.delete_channel("6") is False
+    with pytest.raises(HTTPException):
+        await writer.delete_channel("7")

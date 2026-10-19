@@ -31,3 +31,30 @@ async def danger_delete_all_emojis_and_stickers(context: MigrationContext, progr
     counts = await context.writer.delete_all_emojis_and_stickers(progress_callback=progress_callback)
     context.state.clear_asset_mappings()
     return counts
+
+async def danger_delete_removed_channels(context: MigrationContext, items: list[dict], progress_callback=None) -> int:
+    """
+    Deletes the Fluxer copies of categories/channels/threads that were deleted on Discord
+    (items from clone_server.find_deleted_channels) and clears their mappings and message tracking.
+    Threads go first, categories last. Returns the number of items removed.
+    """
+    order = {"thread": 0, "channel": 1, "category": 2}
+    items = sorted(items, key=lambda i: order.get(i["kind"], 1))
+    removed = 0
+    for idx, item in enumerate(items, start=1):
+        try:
+            # False = already gone on Fluxer (e.g. a thread deleted together with its channel): clean up all the same
+            await context.writer.delete_channel(item["target_id"])
+        except Exception as e:
+            logger.error(f"Failed to delete Fluxer {item['kind']} '{item['name']}' ({item['target_id']}): {e}")
+            continue
+        if item["kind"] == "category":
+            context.state.remove_category_mapping(item["discord_id"])
+        else:
+            context.state.remove_channel_mapping(item["discord_id"])
+            if item["kind"] == "channel":
+                context.state.clear_channel_data(item["target_id"])
+        removed += 1
+        if progress_callback:
+            await progress_callback(item["name"], idx, len(items))
+    return removed

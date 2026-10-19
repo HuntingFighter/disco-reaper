@@ -4,7 +4,7 @@ import logging
 from typing import Optional, List, Dict, Any, Awaitable, Callable
 import aiohttp
 import json
-from fluxer import Bot, Webhook, Forbidden, File
+from fluxer import Bot, Webhook, Forbidden, File, HTTPException
 from fluxer.http import Route
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_MAX_RETRIES = 6
 RATE_LIMIT_MAX_WAIT = 60.0
 RATE_LIMIT_BASE_WAIT = 5.0
+# PATCH /guilds/{id}/channels answers 423 while another hierarchy update runs; Fluxer asks to retry after 2 s
+REORDER_LOCKED_MAX_RETRIES = 5
+REORDER_LOCKED_WAIT = 2
 
 
 def _unparsed_rate_limit_wait(exc: BaseException, attempt: int) -> Optional[float]:
@@ -305,12 +308,36 @@ class FluxerWriter:
                 ),
                 f"modify channel {channel_id}"
             )
+            self._channels_cache = None  # name/parent/position may have changed
         except Forbidden as e:
             if getattr(e, 'code', None) == "NSFW_CONTENT_AGE_RESTRICTED":
                 logger.warning(f"Fluxer: Could not update certain properties (likely NSFW) on channel {channel_id}: {e.message}")
                 return False
             raise
         return True
+
+    async def reorder_channels(self, entries: List[Dict[str, Any]]) -> None:
+        """
+        Moves/reorders guild channels via PATCH /guilds/{guild_id}/channels (fluxer.py has no route for it;
+        PATCH /channels/{id} ignores position). Each entry: {"id", "parent_id" (None = top level, omit to keep),
+        "preceding_sibling_id" (None = first)}. Entries are applied in order; forum/media channels and threads
+        can't be moved here. Retries while another hierarchy update is running (423).
+        """
+        assert self.client is not None
+        if not entries:
+            return
+        route = lambda: self._route("PATCH", "/guilds/{guild_id}/channels", guild_id=self.community_id)
+        logger.debug(f"Fluxer: Reordering channels: {entries}")
+        for attempt in range(REORDER_LOCKED_MAX_RETRIES + 1):
+            try:
+                await self._retry_on_rate_limit(lambda: self.client.request(route(), json=entries), "reorder channels")
+                break
+            except HTTPException as e:
+                if e.status != 423 or attempt >= REORDER_LOCKED_MAX_RETRIES:
+                    raise
+                logger.warning(f"Fluxer: Another channel reorder is running, retrying in {REORDER_LOCKED_WAIT}s")
+                await asyncio.sleep(REORDER_LOCKED_WAIT)
+        self._channels_cache = None
 
     async def move_channel(self, channel_id: str, parent_id: Optional[str]) -> bool:
         """
@@ -844,6 +871,19 @@ class FluxerWriter:
             "icon": "REMOVED" if has_icon else "SKIP",
             "banner": "REMOVED" if has_banner else "SKIP",
         }
+
+    async def delete_channel(self, channel_id: str) -> bool:
+        """Deletes one channel, category or thread. Returns False if it was already gone (404)."""
+        assert self.client is not None
+        try:
+            await self._retry_on_rate_limit(lambda: self.client.delete_channel(channel_id), f"delete channel {channel_id}")
+        except HTTPException as e:
+            if e.status != 404:
+                raise
+            return False
+        finally:
+            self._channels_cache = None
+        return True
 
     async def delete_all_channels(self, progress_callback=None) -> int:
         """

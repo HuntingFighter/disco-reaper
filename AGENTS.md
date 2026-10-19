@@ -204,6 +204,19 @@ Reference: https://docs.discord.com/developers/reference
 - **Migration state** (`MigrationState` → `MigrationDatabase`): source→target
   mappings for channels, categories, roles, emojis, stickers and messages, plus
   per-channel/thread progress and completion flags.
+- **`channel_mappings`** (migration DB): one row per Discord category, channel and
+  thread, keyed by `discord_channel_id`. It holds the channel's Discord data
+  (`CHANNEL_RECORD_COLUMNS` in `database.py`: name, type, position, category/parent,
+  topic, forum and thread fields, …; no permissions/overwrites) and
+  `target_channel_id`, which stays NULL until the channel exists on the target.
+  - Discord data is written with `state.record_source_channels()` (built by
+    `channel_record()` in `state.py`); this never touches `target_channel_id`.
+  - `target_channel_id` is kept in sync by `MigrationState`'s channel/category
+    mapping setters and removers (`set_*_mapping`, `remove_*_mapping`,
+    `clear_channel_mappings`). Record target IDs through those, not by writing
+    the table directly.
+  - Matching uses this table first and falls back to name matching only for
+    channels without a known target.
 - **Schema changes must be backward compatible** — users resume migrations on
   existing databases. Add columns/tables with `IF NOT EXISTS`/migrations; never drop
   or rename existing ones without a migration path.

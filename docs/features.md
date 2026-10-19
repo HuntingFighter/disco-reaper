@@ -24,6 +24,8 @@ Here's complete list of everything the tool can handle and any specific caveats 
     - 🟧 **Slowmode** timing rules are preserved for text channels (Stoat doesnt have slowmode).
     - 🟩 **Bitrate** setting is also preserved Voice channels
     - 🟩 **Permission Overwrites**: Copies role-specific permission overwrites set on individual channels.
+* 🟩 **Fluxer: Renamed & Moved Channels**: Re-running Clone Server Template updates categories, channels and threads that were renamed, moved to another category or reordered on Discord since the last clone. The preview shows them in orange (already present ones in green). The order of forum/media channels within a category is not synced (Fluxer can't reorder them through its API).
+* 🟩 **Fluxer: Channels Deleted on Discord**: Categories, channels and threads that were migrated before and have since been deleted on Discord are shown in red in the Clone Server Template preview. After cloning, a separate confirmation asks whether to delete them on Fluxer as well (this also deletes their migrated messages). Channels that only exist on Fluxer are never touched.
 
 ## Roles
 *  🟩 **Role Cloning**: Clones every custom role with its original name, color (hex code), and hierarchical position.

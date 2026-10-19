@@ -513,6 +513,56 @@ class ArchivedThreadsModal(ModalScreen[bool | None]):
         self.dismiss(None)
 
 
+class DeletedChannelsModal(ModalScreen[bool]):
+    """Confirmation before deleting target copies of channels/threads that were deleted on Discord.
+    Returns True (delete) or False (keep)."""
+    DEFAULT_CSS = """
+    DeletedChannelsModal { align: center middle; }
+    #deleted_dialog {
+        width: 70;
+        max-width: 90%;
+        height: auto;
+        max-height: 90%;
+        border: thick $error;
+        padding: 1 2;
+        background: $surface;
+    }
+    #deleted_title { text-style: bold; color: $error; margin-bottom: 1; width: 100%; }
+    #deleted_list { height: auto; max-height: 16; margin-bottom: 1; }
+    #deleted_msg { margin-bottom: 1; width: 100%; }
+    #deleted_buttons { height: auto; }
+    #deleted_buttons Button { width: 1fr; margin: 0 1; }
+    """
+    BINDINGS = [("escape", "keep", "Keep")]
+    _ICONS = {"category": "📁", "channel": "#", "thread": "🧵"}
+
+    def __init__(self, items: list[dict], target_name: str = "Fluxer"):
+        super().__init__()
+        self._items = items
+        self._target_name = target_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="deleted_dialog"):
+            yield Label(f"⚠ {len(self._items)} deleted on Discord", id="deleted_title")
+            with VerticalScroll(id="deleted_list"):
+                for item in self._items:
+                    yield Label(f"{self._ICONS.get(item['kind'], '-')} {item['name']}", markup=False)
+            yield Label(
+                f"These were migrated before and have since been deleted on Discord. Deleting them on "
+                f"{self._target_name} also deletes their migrated messages. This cannot be undone.",
+                id="deleted_msg"
+            )
+            with Horizontal(id="deleted_buttons"):
+                yield Button(f"Delete on {self._target_name}", id="btn_deleted_delete", variant="error")
+                yield Button("Keep", id="btn_deleted_keep", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "btn_deleted_delete")
+
+    def action_keep(self) -> None:
+        self.dismiss(False)
+
+
 # ---------------------------------------------------------------------------
 # OptionSelectModal – radio-button selection list
 # ---------------------------------------------------------------------------
