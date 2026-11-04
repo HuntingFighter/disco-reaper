@@ -6,6 +6,9 @@ from fluxer import Bot, Webhook, Forbidden, File
 
 logger = logging.getLogger(__name__)
 
+# Pause after each message sent to Fluxer to ease load on the instance.
+MESSAGE_SEND_DELAY_SECONDS = 1.0
+
 class FluxerWriter:
     def __init__(self, token: str, community_id: str, api_url: str = "default"):
         self.token = token
@@ -322,6 +325,7 @@ class FluxerWriter:
                         timeout=45.0 # Increased timeout for potential large file uploads
                     )
                     logger.debug(f"Fluxer: Webhook send complete, msg_id={msg.id if msg else 'None'}")
+                    await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
                     return str(msg.id) if msg else None
                 except asyncio.TimeoutError:
                     print(f"Fluxer: Webhook send timed out after 45s for channel {channel_id}")
@@ -358,6 +362,7 @@ class FluxerWriter:
                         timeout=45.0
                     )
                     logger.debug(f"Fluxer: Bot send complete, msg_id={msg_data.get('id') if msg_data else 'None'}")
+                    await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
                     return str(msg_data["id"]) if msg_data else None
                 except asyncio.TimeoutError:
                     print(f"Fluxer: Bot send timed out after 45s for channel {channel_id}")
@@ -395,6 +400,7 @@ class FluxerWriter:
                 kwargs["message_reference"] = message_reference
 
             msg_data = await self.client.send_message(**kwargs)
+            await asyncio.sleep(MESSAGE_SEND_DELAY_SECONDS)
             return str(msg_data["id"]) if msg_data else None
         except Exception as e:
             print(f"Failed to send marker: {e}")
