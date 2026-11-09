@@ -1,21 +1,8 @@
 # DiscoReaper
 
-## ⭐ Extended PR build — Fluxer as a Source
+This is the actively maintained repository forked from https://github.com/rambros3d/disco-reaper/. I'm currently working on some more features in the v5 branch which is still heavily experimental. For best experience use the v4 branch for now.
 
-> This branch adds **Fluxer as a source platform** (in addition to Discord).
-> It may take a while to be merged upstream, so you can get it directly here:
->
-> - **Pre-built binaries**: [Get them from this fork's Releases page](https://github.com/omstr/disco-reaper/releases/latest)
-> - **Or download the code yourself**:
->   ```bash
->   git clone -b V4-main https://github.com/omstr/disco-reaper.git
->   cd disco-reaper
->   ./launch.sh          # Linux/macOS  (launch.bat on Windows)
->   ```
-
----
-
-**DiscoReaper** is a powerful tool designed to help you migrate your entire Discord server — or a Fluxer community — to Fluxer or Stoat. It clones channels, roles, emojis, permissions, and your community's full message history.
+**DiscoReaper** is a powerful tool designed to help you migrate your entire Discord "server" — or a Fluxer community — to Fluxer or Stoat. It clones channels, roles, emojis, permissions, and your community's full message history.
 
 ### Get it here: [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](https://github.com/rambros3d/disco-reaper/releases/latest/download/disco-reaper-linux.zip)   [![Windows](https://custom-icon-badges.demolab.com/badge/Windows-0078D6?logo=windows11&logoColor=white)](https://github.com/rambros3d/disco-reaper/releases/latest/download/disco-reaper-windows.zip) [![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=F0F0F0)](https://github.com/rambros3d/disco-reaper/releases/latest/download/disco-reaper-macos.zip)
 
