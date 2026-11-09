@@ -1015,6 +1015,7 @@ class BackupReader:
     MESSAGE_TYPE_CONTEXT_MENU_COMMAND = MessageType.context_menu_command
     MESSAGE_TYPE_POLL_RESULT = MessageType.poll_result
     MESSAGE_TYPE_AUTO_MODERATION_ACTION = MessageType.auto_moderation_action
+    MESSAGE_TYPE_GUILD_MEMBER_JOIN = MessageType.user_join
     Forbidden = BackupForbidden
 
     CHANNEL_TYPE_TEXT = ChannelType.text
