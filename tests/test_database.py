@@ -143,3 +143,43 @@ def test_get_messages_paged_after_id(db):
     assert len(page) == 3
     page_after = db.get_messages_paged("10", limit=10, after_id="2")
     assert all(m["id"] > 2 for m in page_after)
+
+
+def _perm(channel_id, target_id, allow=0, deny=0):
+    return {"channel_id": str(channel_id), "target_id": str(target_id), "target_type": "role",
+            "allow": allow, "deny": deny}
+
+
+def _perm_rows(db):
+    return [tuple(r) for r in db._conn.execute(
+        "SELECT channel_id, target_id, allow, deny FROM permissions ORDER BY channel_id, target_id").fetchall()]
+
+
+def test_save_permissions_rebackup_replaces_instead_of_duplicating(db):
+    db.save_permissions([_perm(10, 1, allow=1024), _perm(10, 2, deny=1024)], channel_ids=["10"])
+    # Re-backup: role 2's overwrite was removed and role 1's changed on Discord
+    db.save_permissions([_perm(10, 1, allow=2048)], channel_ids=["10"])
+    assert _perm_rows(db) == [(10, 1, 2048, 0)]
+
+
+def test_save_permissions_clears_channels_without_overwrites(db):
+    db.save_permissions([_perm(10, 1, allow=1024), _perm(20, 1, deny=1024)], channel_ids=["10", "20"])
+    # Channel 10 has no overwrites any more; it's still listed as backed up
+    db.save_permissions([_perm(20, 1, deny=1024)], channel_ids=["10", "20"])
+    assert _perm_rows(db) == [(20, 1, 0, 1024)]
+
+
+def test_save_permissions_keeps_other_channels(db):
+    db.save_permissions([_perm(10, 1, allow=1024), _perm(20, 1, deny=1024)])
+    # Without channel_ids only the channels in the batch are replaced
+    db.save_permissions([_perm(10, 3, allow=8)])
+    assert _perm_rows(db) == [(10, 3, 8, 0), (20, 1, 0, 1024)]
+
+
+def test_get_all_channels_overwrites_not_duplicated_after_rebackup(db):
+    db.save_channels([{"id": "10", "name": "general", "type": 0, "position": 0, "category_id": None,
+                       "topic": None, "nsfw": 0, "bitrate": None, "slowmode_delay": None}])
+    for _ in range(3):
+        db.save_permissions([_perm(10, 1, allow=1024)], channel_ids=["10"])
+    channel = db.get_all_channels()[0]
+    assert len(channel["overwrites"]) == 1

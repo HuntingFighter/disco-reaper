@@ -291,8 +291,8 @@ class DiscordExporter:
             
         if self.db:
             self.db.save_channels(db_channels)
-            if db_permissions:
-                self.db.save_permissions(db_permissions)
+            # Replaces each channel's stored overwrites, also clearing channels that no longer have any
+            self.db.save_permissions(db_permissions, channel_ids=[c["id"] for c in db_channels])
             if db_forum_tags:
                 self.db.save_forum_tags(db_forum_tags)
             

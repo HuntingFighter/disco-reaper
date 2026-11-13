@@ -414,9 +414,17 @@ class BackupDatabase:
             """, channels)
             self._conn.commit()
 
-    def save_permissions(self, permissions: List[Dict[str, Any]]):
-        """Saves a batch of channel permission overwrites."""
+    def save_permissions(self, permissions: List[Dict[str, Any]], channel_ids: Optional[List[Union[str, int]]] = None):
+        """
+        Saves a batch of channel permission overwrites, replacing the stored ones.
+        All former entries of each channel in channel_ids, and of each channel in permissions, are deleted first,
+        so re-backups don't pile up duplicates and removed overwrites disappear. Pass channel_ids with every backed-up
+        channel to also clear channels that have no overwrites any more.
+        """
+        ids = {parse_snowflake(cid) for cid in (channel_ids or [])}
+        ids.update(parse_snowflake(p["channel_id"]) for p in permissions)
         with self._lock:
+            self._conn.executemany("DELETE FROM permissions WHERE channel_id = ?", [(cid,) for cid in ids])
             self._conn.executemany("""
                 INSERT INTO permissions (channel_id, target_id, target_type, allow, deny)
                 VALUES (:channel_id, :target_id, :target_type, :allow, :deny)
