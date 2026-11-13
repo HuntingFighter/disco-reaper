@@ -3,8 +3,11 @@ import logging
 from logging.handlers import RotatingFileHandler
 from src.ui.main_app import run_disco_reaper_tui
 from src.core.configuration import load_config
+from src.core.log_redaction import install_log_redaction
 
 def setup_logging():
+    # Before any handler: libraries log webhook URLs with their token (e.g. fluxer.py on rate limits)
+    install_log_redaction()
     try:
         config = load_config(create_if_missing=False)
         log_level_str = config.log_level.upper()

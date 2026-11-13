@@ -311,7 +311,8 @@ async def _process_and_send_message(
         anonymize_users=anonymize_users
     )
 
-    if not content and not files:
+    # Embed-only messages (e.g. bot posts with a rich embed and no text) are migrated too
+    if not content and not files and not getattr(msg, "embeds", None):
         return None
 
     # Reply Resolution

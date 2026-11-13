@@ -100,6 +100,13 @@ def build_structure_tree(
                 children = [c for c in children if c.kind != THREAD or c.deleted]
                 note = (f"{posts} forum posts, " if posts else "Forum posts are ") + \
                     "only created when migrating messages (renamed posts are updated here)"
+            elif kind == CHANNEL:
+                # Threads are created by message migration too (at their place in the history); listed so
+                # the existing ones show as synced and renamed ones as updated
+                new_threads = sum(1 for c in children if c.kind == THREAD and not c.exists and not c.deleted)
+                if new_threads:
+                    note = (f"{new_threads} new thread{'s' if new_threads != 1 else ''}, "
+                            "only created when migrating messages")
             nodes.append(StructureNode(
                 kind=kind,
                 name=item.name,

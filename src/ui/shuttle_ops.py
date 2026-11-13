@@ -2260,7 +2260,7 @@ class OperationPane(Container):
                 src_categories = await reader.get_categories()
                 src_channels = await reader.get_channels()
                 try:
-                    # Archived too: the clone creates archived threads, and forum post counts must be complete
+                    # Archived too: renamed archived threads are updated, and thread/post counts must be complete
                     src_threads = await reader.get_threads(True)
                 except Exception as e:
                     logger.warning(f"Clone Preview: failed to fetch threads: {e}")

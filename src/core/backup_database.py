@@ -10,6 +10,29 @@ logger = logging.getLogger(__name__)
 
 
 
+# Columns added after the first schema version. _add_missing_columns() adds them to new and existing backups.
+ADDED_COLUMNS = {
+    "channels": {
+        "flags": "INTEGER",
+        "default_auto_archive_duration": "INTEGER",
+        "default_thread_slowmode_delay": "INTEGER",
+        "default_sort_order": "INTEGER",
+        "default_layout": "INTEGER",
+        "default_reaction_emoji": "TEXT",  # JSON {"id", "name"}
+    },
+    "threads": {
+        "slowmode_delay": "INTEGER",
+        "owner_id": "INTEGER",
+        "invitable": "INTEGER",
+        "flags": "INTEGER",
+    },
+}
+CHANNEL_COLUMNS = ("id", "name", "type", "position", "category_id", "topic", "nsfw", "bitrate", "slowmode_delay",
+                   *ADDED_COLUMNS["channels"])
+THREAD_COLUMNS = ("id", "name", "type", "parent_id", "message_count", "member_count", "archived", "archive_timestamp",
+                  "auto_archive_duration", "locked", "applied_tags", *ADDED_COLUMNS["threads"])
+
+
 class BackupDatabase:
     """Manages the SQLite database for local Discord backups."""
     
@@ -24,6 +47,23 @@ class BackupDatabase:
         self._conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache
         self._migrate_db() # Run migrations on existing DBs
         self._init_db()
+        self._add_missing_columns()
+
+    def _add_missing_columns(self):
+        """Adds the ADDED_COLUMNS to tables that don't have them yet (backups made by older versions)."""
+        with self._lock:
+            for table, columns in ADDED_COLUMNS.items():
+                existing = {c["name"] for c in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                for name, col_type in columns.items():
+                    if name not in existing:
+                        logger.info(f"Migrating {table}: adding column '{name}'")
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+            self._conn.commit()
+
+    def _upsert_rows(self, table: str, columns: tuple, rows: List[Dict[str, Any]]):
+        """INSERT OR REPLACE of rows; keys missing in a row are stored as NULL. Caller holds the lock."""
+        sql = f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})"
+        self._conn.executemany(sql, [tuple(r.get(c) for c in columns) for r in rows])
 
     # A temporary function to handle backward compatibility for the content_type (mime_type will be deprecated)
     # It will be removed in the future
@@ -407,11 +447,9 @@ class BackupDatabase:
             self._conn.commit()
 
     def save_channels(self, channels: List[Dict[str, Any]]):
+        """Saves categories and channels (CHANNEL_COLUMNS; missing keys become NULL)."""
         with self._lock:
-            self._conn.executemany("""
-                INSERT OR REPLACE INTO channels (id, name, type, position, category_id, topic, nsfw, bitrate, slowmode_delay)
-                VALUES (:id, :name, :type, :position, :category_id, :topic, :nsfw, :bitrate, :slowmode_delay)
-            """, channels)
+            self._upsert_rows("channels", CHANNEL_COLUMNS, channels)
             self._conn.commit()
 
     def save_permissions(self, permissions: List[Dict[str, Any]], channel_ids: Optional[List[Union[str, int]]] = None):
@@ -461,17 +499,21 @@ class BackupDatabase:
             self._conn.commit()
 
     def save_threads(self, threads: List[Dict[str, Any]]):
-        """Saves metadata for threads to the database."""
+        """Saves metadata for threads and forum posts (THREAD_COLUMNS; missing keys become NULL)."""
         with self._lock:
-            self._conn.executemany("""
-                INSERT OR REPLACE INTO threads (id, name, type, parent_id, message_count, member_count, archived, archive_timestamp, auto_archive_duration, locked, applied_tags)
-                VALUES (:id, :name, :type, :parent_id, :message_count, :member_count, :archived, :archive_timestamp, :auto_archive_duration, :locked, :applied_tags)
-            """, threads)
+            self._upsert_rows("threads", THREAD_COLUMNS, threads)
             self._conn.commit()
 
-    def save_forum_tags(self, tags: List[Dict[str, Any]]):
-        """Saves definitions for forum tags."""
+    def save_forum_tags(self, tags: List[Dict[str, Any]], forum_ids: Optional[List[Union[str, int]]] = None):
+        """
+        Saves forum tag definitions, replacing the stored ones: all former tags of each forum in forum_ids, and of
+        each forum in tags, are deleted first, so tags removed on Discord disappear. Pass forum_ids with every
+        backed-up forum to also clear forums that have no tags any more.
+        """
+        ids = {parse_snowflake(fid) for fid in (forum_ids or [])}
+        ids.update(parse_snowflake(t["forum_id"]) for t in tags)
         with self._lock:
+            self._conn.executemany("DELETE FROM forum_tags WHERE forum_id = ?", [(fid,) for fid in ids])
             self._conn.executemany("""
                 INSERT OR REPLACE INTO forum_tags (id, forum_id, name, moderated, emoji_id, emoji_name)
                 VALUES (:id, :forum_id, :name, :moderated, :emoji_id, :emoji_name)

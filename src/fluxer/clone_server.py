@@ -336,7 +336,6 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
         "categories_created": [],
         "channels_created": [],
         "channels_synced": [],
-        "threads_created": [],
         "updated": [],  # renamed or moved on Discord, edited on Fluxer
         "structure": {} # category_name -> [channel_names]
     }
@@ -366,18 +365,26 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
             # even if the parent category is already correct.
             channels_to_move.append((ch, fluxer_id))
 
-    # 3. Threads. Forum/media posts are skipped here: Fluxer creates a post together with its
-    # first message, so message migration creates them (keeping the original author).
+    # Forum/media channels are left out of the reorder step: the Fluxer route can't move them
     forum_types = {context.sync_reader.CHANNEL_TYPE_FORUM.value, 16}
     forum_ids = {str(ch.id) for ch in all_channels
                  if (ch.type.value if hasattr(ch.type, 'value') else ch.type) in forum_types}
-    threads_to_create = [t for t in all_threads
-                         if str(getattr(t, 'parent_id', None)) not in forum_ids
-                         and (force or not context.state.get_fluxer_channel_id(str(t.id)))]
+
+    # 3. Threads are not created here. Message migration creates each one at its place in the history:
+    # forum posts together with their first message, text-channel threads from their starter message
+    # (or standalone where Discord's "thread created" notice is). Created during cloning, Fluxer's
+    # "thread created" notice would land above all migrated messages and threads would lose their
+    # starter message.
+    if force:
+        # Threads of re-created channels belong to the old copies: message migration creates new ones
+        recreated = {str(ch.id) for ch in channels_to_create}
+        for t in all_threads:
+            if str(getattr(t, 'parent_id', None)) in recreated and context.state.get_fluxer_channel_id(str(t.id)):
+                context.state.remove_channel_mapping(str(t.id))
 
     # 4. Renamed/moved on Discord: existing categories and threads are edited only when they changed
-    # (existing channels are always synced above). Forum posts count too once they exist.
-    mapped_threads = [t for t in all_threads if t not in threads_to_create and context.state.get_fluxer_channel_id(str(t.id))]
+    # (existing channels are always synced above). Threads and forum posts count once they exist.
+    mapped_threads = [t for t in all_threads if context.state.get_fluxer_channel_id(str(t.id))]
     try:
         target_threads = await _target_threads(context, mapped_threads) if mapped_threads else []
     except Exception as e:
@@ -391,7 +398,7 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
                          if str(t.id) in changed and known_target(context.state, str(t.id)) in target_threads_by_id]
 
     total = (len(missing_categories) + len(categories_to_sync) + len(channels_to_create) + len(channels_to_move)
-             + len(threads_to_create) + len(threads_to_rename))
+             + len(threads_to_rename))
     current_idx = 0
     
     if total == 0:
@@ -548,22 +555,6 @@ async def migrate_channels(context: MigrationContext, progress_callback: Callabl
             await context.fluxer_writer.reorder_channels(entries)
         except Exception as e:
             logger.error(f"Failed to reorder channels under {group}: {e}")
-
-    # Create missing threads under their (now mapped) parents
-    for thread in threads_to_create:
-        if not context.is_running: break
-        try:
-            _, target_thread_id, _ = await resolve_target_thread(context, thread, force=force)
-            if target_thread_id:
-                cloned_info["threads_created"].append(thread.name)
-            else:
-                logger.warning(f"Skipping thread '{thread.name}' ({thread.id}): parent channel {getattr(thread, 'parent_id', None)} is not cloned")
-        except Exception as e:
-            # One failing thread (permissions, active thread limit) must not stop the rest
-            logger.error(f"Failed to create thread '{thread.name}' ({thread.id}): {e}")
-
-        current_idx += 1
-        if progress_callback: await progress_callback(f"Thread: {thread.name}", "Copying", current_idx, total)
 
     # Rename threads/forum posts that were renamed on Discord
     for thread, target_thread in threads_to_rename:

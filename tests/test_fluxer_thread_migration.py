@@ -350,3 +350,60 @@ async def test_active_only_waterfall_skips_archived_thread_messages(state):
 
     assert [s["thread_id"] for s in _sends(ctx)] == [None]
     assert stats["threads"] == 0
+
+
+@pytest.mark.asyncio
+async def test_embed_only_message_is_migrated(state):
+    """Bot posts with a rich embed and no text used to be dropped (content and files were both empty)."""
+    reader = _reader({})
+    embed = {"type": "rich", "title": "Daily report", "description": "All systems go"}
+    embed_only = _msg(reader, 1, "", channel=NS(id=11))
+    embed_only.embeds = [embed]
+    empty = _msg(reader, 2, "", channel=NS(id=11))  # nothing to send at all: still skipped
+    reader.fetch_message_history = _reader({11: [embed_only, empty]}).fetch_message_history
+    ctx = _context(state, reader, ["7001"])
+
+    stats = await migrate_messages(ctx, source_channel_id=11, target_channel_id="501")
+
+    sends = _sends(ctx)
+    assert len(sends) == 1
+    assert sends[0]["embeds"] == [embed] and sends[0]["content"] == ""
+    assert stats["messages"] == 1
+    assert str(state.get_fluxer_message_id("501", "1")) == "7001"
+
+
+@pytest.mark.asyncio
+async def test_standalone_thread_is_created_at_its_notice_in_the_history(state):
+    """Threads aren't created while cloning anymore: a standalone thread (Discord posts a "thread created"
+    notice in the parent) is created when migration reaches that notice, so Fluxer's own notice lands
+    between the messages before and after it instead of above the whole history."""
+    thread = _thread(12, "side chat", parent_id=11)
+    reader = _reader({})
+    notice = _msg(reader, 101, "side chat", thread=thread)
+    notice.type = "thread_created"  # system message: not sent itself, but its thread is migrated here
+    history = {11: [_msg(reader, 100, "before"), notice, _msg(reader, 102, "after")], 12: [_msg(reader, 200, "inside")]}
+    reader.fetch_message_history = _reader(history).fetch_message_history
+    ctx = _context(state, reader, [])
+    order = []
+
+    async def send(**kwargs):
+        order.append(("send", kwargs["content"], kwargs.get("thread_id")))
+        return f"f{len(order)}"
+
+    async def create_thread(parent_id, name, **kwargs):
+        order.append(("create_thread", name, parent_id))
+        return "8888"
+
+    ctx.fluxer_writer.send_message = AsyncMock(side_effect=send)
+    ctx.fluxer_writer.create_thread = AsyncMock(side_effect=create_thread)
+
+    await migrate_messages(ctx, source_channel_id=11, target_channel_id="501")
+
+    assert order == [
+        ("send", "before", None),
+        ("create_thread", "side chat", "501"),
+        ("send", "inside", "8888"),
+        ("send", "after", None),
+    ]
+    ctx.fluxer_writer.create_thread_from_message.assert_not_awaited()
+    assert str(state.get_target_channel_id("12")) == "8888"

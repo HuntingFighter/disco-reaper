@@ -30,6 +30,10 @@ The backup is stored in a single SQLite file, typically found in your `ReaperFil
 *   **`guild_profile`**: Stores server name, ID, description, owner, and icon/banner URLs.
 *   **`roles` & `permissions`**: Captures every custom role (colors, bits) and complex channel-specific permission overwrites.
 *   **`channels` & `threads`**: Detailed metadata including category nesting, NSFW flags, bitrates, and thread archive statuses.
+    *   Every backup saves the structure of **all** threads and forum posts (active and archived public ones), even for channels whose messages aren't backed up. Archived private threads need *Manage Threads*, which the bot doesn't have, so they aren't included.
+    *   Thread fields: parent, type, archived/locked, auto-archive duration, slowmode, owner, invitable, flags (e.g. pinned forum post) and applied forum tags.
+    *   Forum fields: available tags (`forum_tags`), default auto-archive duration, default post slowmode, default sort order, default layout, default reaction emoji and flags (e.g. *Require tags*).
+    *   Re-backups replace a channel's permission overwrites and a forum's tags, so removed ones disappear. Channels and threads deleted on Discord stay in the backup.
 *   **`messages`**: The central history table. Stores sender IDs, timestamps, content, and references.
 *   **`attachments` / `embeds` / `reactions`**: Relational tables linked to `messages` for storing rich data.
 *   **`users`**: A deduplicated author cache (usernames, avatars, server roles).

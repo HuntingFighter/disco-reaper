@@ -10,6 +10,26 @@ from src.core.backup_database import BackupDatabase
 
 logger = logging.getLogger(__name__)
 
+
+def _int_value(value) -> int | None:
+    """Enum / flags object / bool / int -> int for the DB, None stays None."""
+    if value is None:
+        return None
+    if hasattr(value, "value"):
+        value = value.value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _emoji_json(emoji) -> str | None:
+    """A forum's default reaction emoji as JSON {"id", "name"} (id is None for a unicode emoji)."""
+    if not emoji:
+        return None
+    emoji_id = getattr(emoji, "id", None)
+    return json.dumps({"id": str(emoji_id) if emoji_id else None, "name": getattr(emoji, "name", None)})
+
 class DiscordExporter:
     """Core logic for exporting Discord server data."""
     
@@ -293,10 +313,45 @@ class DiscordExporter:
             self.db.save_channels(db_channels)
             # Replaces each channel's stored overwrites, also clearing channels that no longer have any
             self.db.save_permissions(db_permissions, channel_ids=[c["id"] for c in db_channels])
-            if db_forum_tags:
-                self.db.save_forum_tags(db_forum_tags)
-            
+            # Same for forum tags: tags removed on Discord disappear from the backup
+            forum_ids = [str(c.id) for c in channels if isinstance(c, discord.ForumChannel)]
+            self.db.save_forum_tags(db_forum_tags, forum_ids=forum_ids)
+
+        # Threads and forum posts of every channel, also those whose messages aren't backed up
+        await self.export_threads_structure(channels)
+
         return db_channels, cat_count, chan_count
+
+    async def export_threads_structure(self, channels: list | None = None) -> int:
+        """
+        Saves the metadata of every thread and forum post (active and archived public ones) so the backup holds
+        the full server structure, not only the threads of channels whose messages were backed up.
+        Archived private threads need Manage Threads, which the bot doesn't have, so they aren't included.
+        Returns the number of saved threads.
+        """
+        if not self.db:
+            return 0
+        if channels is None:
+            channels = await self.reader.get_channels()
+        parents = {c.id: c for c in channels}
+        try:
+            threads = await self.reader.get_threads(include_archived=True)
+        except Exception as e:
+            logger.error(f"Failed to fetch threads for the backup structure: {e}")
+            return 0
+
+        # The tag fallback in _format_thread fetches single threads; limit it like the message export does
+        sem = asyncio.Semaphore(5)
+
+        async def _format(t):
+            async with sem:
+                return await self._format_thread(t, parents.get(t.parent_id))
+
+        rows = await asyncio.gather(*(_format(t) for t in threads))
+        if rows:
+            self.db.save_threads(list(rows))
+        logger.info(f"Backed up structure of {len(rows)} threads and forum posts")
+        return len(rows)
 
     async def _process_channel_batch(self, channels):
         """Processes a batch of channels, extracting metadata, permissions, and forum tags."""
@@ -345,7 +400,14 @@ class DiscordExporter:
             "topic": getattr(c, "topic", None),
             "nsfw": 1 if getattr(c, "nsfw", False) else 0,
             "bitrate": getattr(c, "bitrate", None),
-            "slowmode_delay": getattr(c, "slowmode_delay", None)
+            "slowmode_delay": getattr(c, "slowmode_delay", None),
+            # Thread / forum settings (None where the channel type doesn't have them)
+            "flags": _int_value(getattr(c, "flags", None)),
+            "default_auto_archive_duration": getattr(c, "default_auto_archive_duration", None),
+            "default_thread_slowmode_delay": getattr(c, "default_thread_slowmode_delay", None),
+            "default_sort_order": _int_value(getattr(c, "default_sort_order", None)),
+            "default_layout": _int_value(getattr(c, "default_layout", None)),
+            "default_reaction_emoji": _emoji_json(getattr(c, "default_reaction_emoji", None)),
         }
         
         return data, ch_permissions, ch_forum_tags
@@ -768,6 +830,71 @@ class DiscordExporter:
                 except: pass
         return None
 
+    async def _format_thread(self, t, channel=None) -> Dict[str, Any]:
+        """Prepares a thread's / forum post's metadata for DB storage. channel: its parent, if known."""
+        is_forum = isinstance(channel, discord.ForumChannel)
+        applied_tags = []
+
+        # If parent is missing, try to link it from our fetched channel object
+        # This ensures discord.py can resolve the applied_tags correctly
+        try:
+            if channel is not None and t.parent is None:
+                # Internal hack: link parent if missing to help resolve tags
+                t._parent = channel
+        except Exception:
+            pass
+
+        if hasattr(t, "applied_tags"):
+            # Attempt 1: Standard attribute
+            try:
+                applied_tags = [str(tag.id) for tag in t.applied_tags]
+            except Exception:
+                applied_tags = []
+
+            # Attempt 2: Internal list of IDs if available (sometimes populated when property is empty)
+            if not applied_tags and hasattr(t, "_applied_tags"):
+                raw_ids = getattr(t, "_applied_tags", [])
+                if raw_ids:
+                    logger.info(f"Thread '{t.name}' ({t.id}) found raw tags in _applied_tags: {raw_ids}")
+                    applied_tags = [str(tid) for tid in raw_ids]
+
+            # Attempt 3: If still empty and it's a forum thread, try to fetch it specifically
+            if not applied_tags and is_forum:
+                try:
+                    # (Discord sometimes doesn't include tags in bulk guild.active_threads)
+                    fetched_t = await self.reader.client.fetch_channel(t.id)
+                    if hasattr(fetched_t, "applied_tags"):
+                        applied_tags = [str(tag.id) for tag in fetched_t.applied_tags]
+                    if not applied_tags and hasattr(fetched_t, "_applied_tags"):
+                        raw_ids = getattr(fetched_t, "_applied_tags", [])
+                        applied_tags = [str(tid) for tid in raw_ids]
+                except Exception as e:
+                    logger.debug(f"Failed to fetch thread {t.id} for tags: {e}")
+
+        if not applied_tags and is_forum:
+            # Posts without tags are normal; this is only worth a look when a forum's posts all come back empty
+            logger.debug(f"Thread '{t.name}' ({t.id}) in forum '{channel.name}' has no tags")
+
+        parent_id = t.parent_id or (channel.id if channel is not None else None)
+        archive_ts = getattr(t, "archive_timestamp", None)
+        return {
+            "id": str(t.id),
+            "name": t.name,
+            "type": _int_value(getattr(t, "type", None)) or 11,  # Default to public_thread
+            "parent_id": str(parent_id) if parent_id else None,
+            "message_count": getattr(t, "message_count", 0),
+            "member_count": getattr(t, "member_count", 0),
+            "archived": 1 if getattr(t, "archived", False) else 0,
+            "archive_timestamp": archive_ts.isoformat() if archive_ts else None,
+            "auto_archive_duration": getattr(t, "auto_archive_duration", None),
+            "locked": 1 if getattr(t, "locked", False) else 0,
+            "applied_tags": json.dumps(applied_tags),
+            "slowmode_delay": getattr(t, "slowmode_delay", None),
+            "owner_id": str(t.owner_id) if getattr(t, "owner_id", None) else None,
+            "invitable": _int_value(getattr(t, "invitable", None)),
+            "flags": _int_value(getattr(t, "flags", None)),  # e.g. the pinned forum post
+        }
+
     async def export_threads(self, channel_id: int, progress_callback=None, force=False, accumulated_count=0, accumulated_threads=0, accumulated_files=0, after_id: int | None = None):
         """Exports active and archived threads for a channel to SQLite."""
         channel = await self.reader.get_channel(channel_id)
@@ -797,62 +924,7 @@ class DiscordExporter:
         logger.debug(f"Exporting threads for channel '{channel.name}' ({channel.id}) [Type: {type(channel)}] [Is Forum: {is_forum}]")
 
         if all_threads and self.db:
-            thread_meta = []
-            for t in all_threads:
-                applied_tags = []
-                
-                # If parent is missing, try to link it from our fetched channel object
-                # This ensures discord.py can resolve the applied_tags correctly
-                try:
-                    if t.parent is None:
-                        # Internal hack: link parent if missing to help resolve tags
-                        t._parent = channel
-                except Exception:
-                    pass
-
-                if hasattr(t, "applied_tags"):
-                    # Attempt 1: Standard attribute
-                    applied_tags = [str(tag.id) for tag in t.applied_tags]
-                    
-                    # Attempt 2: Internal list of IDs if available (sometimes populated when property is empty)
-                    if not applied_tags and hasattr(t, "_applied_tags"):
-                        raw_ids = getattr(t, "_applied_tags", [])
-                        if raw_ids:
-                            logger.info(f"Thread '{t.name}' ({t.id}) found raw tags in _applied_tags: {raw_ids}")
-                            applied_tags = [str(tid) for tid in raw_ids]
-
-                    # Attempt 3: If still empty and it's a forum thread, try to fetch it specifically
-                    if not applied_tags and is_forum:
-                        try:
-                            # We can try to fetch the thread specifically to get tags
-                            # (Discord sometimes doesn't include tags in bulk guild.active_threads)
-                            fetched_t = await self.reader.client.fetch_channel(t.id)
-                            # Check both property and internal list on fetched object
-                            if hasattr(fetched_t, "applied_tags"):
-                                applied_tags = [str(tag.id) for tag in fetched_t.applied_tags]
-                            if not applied_tags and hasattr(fetched_t, "_applied_tags"):
-                                raw_ids = getattr(fetched_t, "_applied_tags", [])
-                                applied_tags = [str(tid) for tid in raw_ids]
-                        except Exception as e:
-                            logger.debug(f"Failed to fetch thread {t.id} for tags: {e}")
-                            pass
-                
-                if not applied_tags and is_forum:
-                    logger.warning(f"Thread '{t.name}' ({t.id}) is in forum '{channel.name}' but NO tags found (tried all methods)")
-
-                thread_meta.append({
-                    "id": str(t.id),
-                    "name": t.name,
-                    "type": int(t.type.value) if hasattr(t.type, "value") else 11, # Default to public_thread
-                    "parent_id": str(t.parent_id) if t.parent_id else str(channel.id),
-                    "message_count": getattr(t, "message_count", 0),
-                    "member_count": getattr(t, "member_count", 0),
-                    "archived": 1 if t.archived else 0,
-                    "archive_timestamp": t.archive_timestamp.isoformat() if t.archive_timestamp else None,
-                    "auto_archive_duration": t.auto_archive_duration,
-                    "locked": 1 if getattr(t, "locked", False) else 0,
-                    "applied_tags": json.dumps(applied_tags)
-                })
+            thread_meta = [await self._format_thread(t, channel) for t in all_threads]
             self.db.save_threads(thread_meta)
 
         # Export threads concurrently — semaphore limits to 5 at a time to

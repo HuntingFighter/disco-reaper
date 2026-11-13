@@ -80,6 +80,7 @@ def test_render_lines(tree):
         "  - 🧵 orphan",
         "  [green]📁 Text[/green]",
         "    - [green]# general[/green]",
+        "      [dim]2 new threads, only created when migrating messages[/dim]",
         "      - 🧵 first",
         "      - 🧵 second",
         "    - # memes",
@@ -110,6 +111,7 @@ def test_render_limits_threads_per_parent():
     lines = render_structure_lines(many, max_threads=2)
     assert lines == [
         "  - # busy",
+        "    [dim]5 new threads, only created when migrating messages[/dim]",
         "    - 🧵 t0",
         "    - 🧵 t1",
         "    [dim]... and 3 more threads[/dim]",
@@ -193,6 +195,7 @@ def test_forum_posts_are_hidden_with_a_note():
         "  - # gallery",
         "    [dim]Forum posts are only created when migrating messages (renamed posts are updated here)[/dim]",
         "  - # general",
+        "    [dim]1 new thread, only created when migrating messages[/dim]",
         "    - 🧵 chat",
     ]
 
@@ -244,3 +247,19 @@ async def test_clone_preview_places_deleted_channels_under_their_old_parent(monk
         (CATEGORY, "Text", [(CHANNEL, "general", [(THREAD, "old thread", [])]), (CHANNEL, "old", [])]),
     ])
     assert {n.name for n in preview["structure"].walk() if n.deleted} == {"old", "old thread"}
+
+
+def test_new_threads_note_counts_only_threads_missing_on_the_target():
+    tree = build_structure_tree(
+        channels=[chan(1, "general"), chan(2, "synced")],
+        threads=[thread(10, "old", parent_id=1), thread(11, "new", parent_id=1), thread(12, "done", parent_id=2)],
+        is_mapped=lambda kind, item_id: item_id in {1, 2, 10, 12},
+    )
+    assert render_structure_lines(tree) == [
+        "  - [green]# general[/green]",
+        "    [dim]1 new thread, only created when migrating messages[/dim]",
+        "    - [green]🧵 old[/green]",
+        "    - 🧵 new",
+        "  - [green]# synced[/green]",  # all its threads exist: no note
+        "    - [green]🧵 done[/green]",
+    ]

@@ -323,7 +323,9 @@ class BackupChannel:
 
     __slots__ = ("id", "name", "type", "position", "topic", "nsfw",
                  "category_id", "available_tags", "parent_id", "guild", "overwrites",
-                 "bitrate", "slowmode_delay")
+                 "bitrate", "slowmode_delay", "flags", "default_auto_archive_duration",
+                 "default_thread_slowmode_delay", "default_sort_order", "default_layout",
+                 "default_reaction_emoji")
 
     _TYPE_MAP = {
         "text": ChannelType.text,
@@ -344,6 +346,20 @@ class BackupChannel:
         self.nsfw = bool(data.get("nsfw", False))
         self.bitrate = data.get("bitrate")
         self.slowmode_delay = data.get("slowmode_delay")
+        # Thread / forum settings (None in backups made before they were saved)
+        self.flags = data.get("flags")
+        self.default_auto_archive_duration = data.get("default_auto_archive_duration")
+        self.default_thread_slowmode_delay = data.get("default_thread_slowmode_delay")
+        self.default_sort_order = data.get("default_sort_order")
+        self.default_layout = data.get("default_layout")
+        self.default_reaction_emoji = None
+        raw_emoji = data.get("default_reaction_emoji")
+        if raw_emoji:
+            try:
+                e = json.loads(raw_emoji) if isinstance(raw_emoji, str) else raw_emoji
+                self.default_reaction_emoji = BackupPartialEmoji(name=e.get("name"), id=parse_snowflake(e.get("id")) or None)
+            except Exception:
+                pass
         cid = data.get("category_id")
         self.category_id = parse_snowflake(cid) if cid else category_id
         self.parent_id = self.category_id
@@ -635,7 +651,8 @@ class BackupThread:
     """Minimal stand-in for discord.Thread metadata attached to a starter message."""
 
     __slots__ = ("id", "name", "message_count", "archived",
-                 "auto_archive_duration", "locked", "parent_id", "applied_tags", "type")
+                 "auto_archive_duration", "locked", "parent_id", "applied_tags", "type",
+                 "member_count", "archive_timestamp", "slowmode_delay", "owner_id", "invitable", "flags")
 
     def __init__(self, data: dict, parent_id: int | None = None):
         if not isinstance(data, dict):
@@ -655,6 +672,13 @@ class BackupThread:
         self.archived = data.get("archived", False)
         self.auto_archive_duration = data.get("auto_archive_duration", 1440)
         self.locked = data.get("locked", False)
+        self.member_count = data.get("member_count")
+        self.archive_timestamp = data.get("archive_timestamp")
+        # None in backups made before these were saved
+        self.slowmode_delay = data.get("slowmode_delay")
+        self.owner_id = parse_snowflake(data.get("owner_id")) or None
+        self.invitable = data.get("invitable")
+        self.flags = data.get("flags")
         pid = data.get("parent_id")
         self.parent_id = parse_snowflake(pid) if pid else parent_id
         

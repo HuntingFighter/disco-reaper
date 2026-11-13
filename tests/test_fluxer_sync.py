@@ -10,7 +10,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from src.core.state import MigrationState
-from src.fluxer.clone_server import sync_channel_state, migrate_channels, changed_channel_ids, find_deleted_channels
+from src.fluxer.clone_server import (sync_channel_state, migrate_channels, changed_channel_ids, find_deleted_channels,
+                                     resolve_target_thread)
 from src.fluxer.danger_zone import danger_delete_removed_channels
 from src.fluxer.roles_permissions import sync_roles_state
 from src.fluxer.emoji_stickers import sync_assets_state
@@ -46,6 +47,9 @@ def _channel_context(state, categories, channels, threads, target_channels, targ
         CHANNEL_TYPE_VOICE=NS(value=2),
         CHANNEL_TYPE_TEXT=NS(value=0),
         CHANNEL_TYPE_NEWS=NS(value=5),
+        CHANNEL_TYPE_THREAD_ANNOUNCEMENT=NS(value=10),
+        CHANNEL_TYPE_THREAD_PUBLIC=NS(value=11),
+        CHANNEL_TYPE_THREAD_PRIVATE=NS(value=12),
     )
     writer = NS(
         get_channels=AsyncMock(return_value=target_channels),
@@ -211,17 +215,19 @@ def _cloned_ctx(state, threads, target_threads=(), channels=None, target_channel
 
 
 @pytest.mark.asyncio
-async def test_migrate_channels_creates_missing_threads_under_parent(fluxer_state):
+async def test_migrate_channels_leaves_new_threads_to_message_migration(fluxer_state):
+    """Created while cloning, Fluxer's "thread created" notice would land above all migrated messages,
+    and the thread would lose its starter message. Message migration creates it in place instead."""
     thread = NS(id=12, name="help", parent_id=11, type=NS(value=12), auto_archive_duration=1440,
                 slowmode_delay=0, archived=False, locked=False)
     ctx = _cloned_ctx(fluxer_state, threads=[thread])
 
     result = await migrate_channels(ctx)
 
-    ctx.fluxer_writer.create_thread.assert_awaited_once_with(
-        "501", "help", type=12, auto_archive_duration=1440, slowmode_delay=None)
-    assert result["threads_created"] == ["help"]
-    assert str(fluxer_state.get_target_channel_id("12")) == "8888"
+    ctx.fluxer_writer.create_thread.assert_not_called()
+    ctx.fluxer_writer.create_thread_from_message.assert_not_called()
+    assert "threads_created" not in result
+    assert fluxer_state.get_target_channel_id("12") is None
 
 
 @pytest.mark.asyncio
@@ -233,36 +239,38 @@ async def test_migrate_channels_skips_forum_posts_and_unmapped_parents(fluxer_st
     ctx = _cloned_ctx(fluxer_state, threads=[post, orphan],
                       channels=[_channel(11, "general", category_id=10), forum])
 
-    result = await migrate_channels(ctx)
+    await migrate_channels(ctx)
 
     ctx.fluxer_writer.create_thread.assert_not_called()
-    assert result["threads_created"] == []
     assert fluxer_state.get_target_channel_id("20") is None
 
 
 @pytest.mark.asyncio
-async def test_migrate_channels_announcement_parent_gets_announcement_thread(fluxer_state):
+async def test_force_clone_drops_thread_mappings_of_recreated_channels(fluxer_state):
+    """Force re-creates the channel; its old thread mapping would point into the old copy."""
+    fluxer_state.set_channel_mapping("12", "777")
+    thread = NS(id=12, name="help", parent_id=11, type=NS(value=11))
+    ctx = _cloned_ctx(fluxer_state, threads=[thread])
+    ctx.fluxer_writer.create_channel = AsyncMock(return_value="9001")
+
+    await migrate_channels(ctx, force=True)
+
+    assert str(fluxer_state.get_target_channel_id("11")) == "9001"
+    assert fluxer_state.get_target_channel_id("12") is None
+    ctx.fluxer_writer.create_thread.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_thread_announcement_parent_gets_announcement_thread(fluxer_state):
     thread = NS(id=12, name="news-talk", parent_id=11, type=NS(value=11))
     ctx = _cloned_ctx(fluxer_state, threads=[thread],
                       target_channels=[{"id": "500", "name": "cat", "type": 4},
                                        {"id": "501", "name": "general", "type": 5, "parent_id": "500"}])
 
-    await migrate_channels(ctx)
+    _, target_id, _ = await resolve_target_thread(ctx, thread)
 
     assert ctx.fluxer_writer.create_thread.await_args.kwargs["type"] == 10
-
-
-@pytest.mark.asyncio
-async def test_migrate_channels_continues_after_failing_thread(fluxer_state):
-    threads = [NS(id=12, name="a", parent_id=11, type=NS(value=11)), NS(id=13, name="b", parent_id=11, type=NS(value=11))]
-    ctx = _cloned_ctx(fluxer_state, threads=threads)
-    ctx.fluxer_writer.create_thread = AsyncMock(side_effect=[RuntimeError("MAX_ACTIVE_THREADS"), "8890"])
-
-    result = await migrate_channels(ctx)
-
-    assert result["threads_created"] == ["b"]
-    assert fluxer_state.get_target_channel_id("12") is None
-    assert str(fluxer_state.get_target_channel_id("13")) == "8890"
+    assert str(fluxer_state.get_target_channel_id("12")) == str(target_id)
 
 
 @pytest.mark.asyncio
