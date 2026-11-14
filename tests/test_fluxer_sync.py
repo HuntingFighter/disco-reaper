@@ -35,7 +35,7 @@ def _channel(id, name, category_id=None, position=0):
 
 def _thread(id, name, category_id=None, position=0, parent=None):
     return NS(id=id, name=name, category_id=category_id, position=position,
-              type=NS(value=0), topic="", nsfw=False, slowmode_delay=0, parent_id=parent)
+              type=NS(value=11), topic="", nsfw=False, slowmode_delay=0, parent_id=parent)
 
 
 def _channel_context(state, categories, channels, threads, target_channels, target_threads=()):
@@ -571,3 +571,30 @@ async def test_danger_delete_removed_channels_deletes_and_clears_mappings(fluxer
     assert str(fluxer_state.get_target_channel_id("16")) == "506"   # failed delete keeps its mapping
     assert fluxer_state.get_channel_record("12")["target_channel_id"] is None
     assert fluxer_state.get_last_message_id("502") is None
+
+
+# --- F25: bot roles ---
+
+def _role(id, name, bot=False, position=1):
+    return NS(id=id, name=name, position=position, color=NS(value=0), hoist=False, mentionable=False,
+              permissions=NS(value=8), is_bot_managed=lambda: bot)
+
+
+@pytest.mark.asyncio
+async def test_bot_roles_are_not_cloned_even_with_force(fluxer_state):
+    """F25: Discord's managed bot role (e.g. Reaper) was copied, next to the Fluxer bot's own role of that name."""
+    from src.fluxer.roles_permissions import migrate_roles
+    ctx = _asset_context(fluxer_state, roles=[_role(20, "Mod"), _role(21, "Reaper", bot=True)])
+    ctx.is_running = True
+    ctx.fluxer_writer.create_role = AsyncMock(return_value="600")
+
+    assert await migrate_roles(ctx, force=True) == ["Mod"]
+    assert [c.kwargs["name"] for c in ctx.fluxer_writer.create_role.await_args_list] == ["Mod"]
+    assert fluxer_state.get_role_mapping("21") is None
+
+
+@pytest.mark.asyncio
+async def test_bot_roles_are_not_matched_by_name(fluxer_state):
+    ctx = _asset_context(fluxer_state, roles=[_role(21, "Reaper", bot=True)], t_roles=[{"id": "601", "name": "Reaper"}])
+    await sync_roles_state(ctx)
+    assert fluxer_state.get_role_mapping("21") is None

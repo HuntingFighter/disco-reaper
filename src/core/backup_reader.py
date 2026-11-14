@@ -247,12 +247,13 @@ class BackupAsset:
 class BackupRole:
     """Minimal stand-in for discord.Role."""
 
-    __slots__ = ("id", "name", "color", "position", "permissions", "hoist", "managed", "mentionable")
+    __slots__ = ("id", "name", "color", "position", "permissions", "hoist", "managed", "mentionable", "bot_id")
 
     def __init__(self, data: dict):
         if not isinstance(data, dict):
             self.id = 0
             self.name = "Unknown"
+            self.bot_id = None
             return
         self.id = parse_snowflake(data["id"])
         self.name = data["name"]
@@ -260,8 +261,14 @@ class BackupRole:
         self.position = data.get("position", 0)
         self.permissions = BackupPermissions(parse_snowflake(data.get("permissions", 0)) or 0)
         self.hoist = bool(data.get("hoist", False))
-        self.managed = False
+        self.managed = bool(data.get("managed"))
         self.mentionable = bool(data.get("mentionable", True))
+        # Backups made before the column existed have no bot_id: those roles count as regular roles
+        self.bot_id = parse_snowflake(data.get("bot_id")) or None
+
+    def is_bot_managed(self) -> bool:
+        """Like discord.Role.is_bot_managed(): the role a bot gets when it joins."""
+        return bool(self.bot_id)
 
     @property
     def mention(self) -> str:
@@ -652,7 +659,8 @@ class BackupThread:
 
     __slots__ = ("id", "name", "message_count", "archived",
                  "auto_archive_duration", "locked", "parent_id", "applied_tags", "type",
-                 "member_count", "archive_timestamp", "slowmode_delay", "owner_id", "invitable", "flags")
+                 "member_count", "archive_timestamp", "slowmode_delay", "owner_id", "invitable", "flags",
+                 "last_message_id")
 
     def __init__(self, data: dict, parent_id: int | None = None):
         if not isinstance(data, dict):
@@ -679,6 +687,8 @@ class BackupThread:
         self.owner_id = parse_snowflake(data.get("owner_id")) or None
         self.invitable = data.get("invitable")
         self.flags = data.get("flags")
+        # Newest backed-up message (like discord.Thread.last_message_id); set by BackupReader when loading
+        self.last_message_id = parse_snowflake(data.get("last_message_id")) or None
         pid = data.get("parent_id")
         self.parent_id = parse_snowflake(pid) if pid else parent_id
         
@@ -1143,8 +1153,9 @@ class BackupReader:
         
         # Load threads
         thread_rows = self.db.get_all_threads()
+        last_ids = self.db.get_last_message_ids()
         for tdata in thread_rows:
-            thread = BackupThread(tdata)
+            thread = BackupThread({**tdata, "last_message_id": last_ids.get(parse_snowflake(tdata.get("id")))})
             self._threads.append(thread)
             if thread.id:
                 self._thread_map[thread.id] = thread
@@ -1348,6 +1359,12 @@ class BackupReader:
     async def get_stickers(self) -> List[BackupSticker]:
         return list(self.stickers)
 
+    async def get_member_display_name(self, user_id: int) -> str | None:
+        """Same as DiscordReader.get_member_display_name, from the backed-up users."""
+        member = self.guild.get_member(int(user_id)) if self.guild else None
+        name = getattr(member, "display_name", None)
+        return name if name and name != "Unknown" else None
+
     async def get_members(self) -> List[BackupMember]:
         return list(self.members)
 
@@ -1400,7 +1417,10 @@ class BackupReader:
         
         channel_id = parse_snowflake(msg_data["channel_id"])
         channel = next((c for c in self.channels if c.id == channel_id), None)
-        
+        if channel is None:
+            # Thread / forum post messages: their channel is the thread (like discord.py's msg.channel)
+            channel = self._thread_map.get(channel_id)
+
         bm = BackupMessage(
             msg_data,
             author=author,

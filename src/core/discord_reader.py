@@ -70,6 +70,7 @@ class DiscordReader:
         
         self.guild: discord.Guild | None = None
         self.client: discord.Client | None = None
+        self._member_names: dict[int, str | None] = {}  # get_member_display_name cache
 
     def _create_client(self):
         intents = discord.Intents.default()
@@ -219,6 +220,31 @@ class DiscordReader:
         async for member in self.guild.fetch_members(limit=None):
             members.append(member)
         return members
+
+    async def get_member_display_name(self, user_id: int) -> str | None:
+        """
+        Display name for a user ID mentioned in a message (REST, cached): the server member, or the user
+        if they left. None if unknown. Needed because this reader has no gateway member cache, and
+        msg.mentions only lists users who were actually pinged.
+        """
+        user_id = int(user_id)
+        if user_id in self._member_names:
+            return self._member_names[user_id]
+        name = None
+        if self.guild:
+            try:
+                name = (await self.guild.fetch_member(user_id)).display_name
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as e:
+                logger.debug(f"Could not fetch member {user_id}: {e}")
+        if name is None and self.client:
+            try:
+                name = (await self.client.fetch_user(user_id)).display_name
+            except discord.HTTPException as e:
+                logger.debug(f"Could not fetch user {user_id}: {e}")
+        self._member_names[user_id] = name
+        return name
 
     async def get_channels(self, category_id: int | None = None):
         """Yields all non-category channels."""

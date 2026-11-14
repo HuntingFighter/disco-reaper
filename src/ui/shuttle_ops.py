@@ -1781,52 +1781,23 @@ class OperationPane(Container):
                 return
             self.engine.include_archived_threads = include_archived
             
-            # 2. Resumption check
-            all_mapped_tgt_ids = []
-            # Check regular text channels (exclude categories for resume check)
-            for c in d_channels:
-                if c.type == 4: continue
-                did = str(c.id)
-                tid = self.engine.state.get_target_channel_id(did)
-                if tid: all_mapped_tgt_ids.append(tid)
-            
-            # Also check threads (filtering to only include those belonging to active channels)
+            # 2. Resume point (state.waterfall_resume_point): mapped channels and threads of the migrated
+            # channels; in backup mode only those with backed-up messages (an empty one would stay at 0).
+            state = self.engine.state
             active_channel_ids = {str(c.id) for c in d_channels}
-            if hasattr(self.engine.discord_reader, "get_active_threads"):
-                threads = await self.engine.discord_reader.get_active_threads()
-                for t in threads:
-                    pid = str(getattr(t, 'parent_id', getattr(t, 'channel_id', None)))
-                    if pid not in active_channel_ids: continue
-                    tid = self.engine.state.get_target_channel_id(str(t.id))
-                    if tid: all_mapped_tgt_ids.append(tid)
-            
-            # 2.5 Filter by actual content (Only for BackupReader)
-            # If a channel has NO messages in the backup, it will always be at 0 progress.
-            # We exclude those from the global MIN calculation to avoid pulling it to 0.
+            resume_channels = d_channels
             if hasattr(self.engine.discord_reader, "get_backed_up_channel_ids"):
-                backed_up_src_ids = await self.engine.discord_reader.get_backed_up_channel_ids()
-                backed_up_src_ids_str = {str(sid) for sid in backed_up_src_ids}
-                
-                filtered_tgt_ids = []
-                # Find which target IDs belong to source channels that HAVE messages
-                for c in d_channels: # (d_channels is already filtered for skipped)
-                    if str(c.id) in backed_up_src_ids_str:
-                        tid = self.engine.state.get_target_channel_id(str(c.id))
-                        if tid: filtered_tgt_ids.append(tid)
-                
-                # Also check threads
-                if hasattr(self.engine.discord_reader, "threads"):
-                    for t in self.engine.discord_reader.threads:
-                        if str(t.id) in backed_up_src_ids_str:
-                            tid = self.engine.state.get_target_channel_id(str(t.id))
-                            if tid: filtered_tgt_ids.append(tid)
-                
-                if filtered_tgt_ids:
-                    all_mapped_tgt_ids = filtered_tgt_ids
-                
-            # 2.6 Resume Point: Calculate from global channel minimums
-            min_last_id = self.engine.state.get_global_min_last_message_id(all_mapped_tgt_ids)
-            
+                backed_up = {str(sid) for sid in await self.engine.discord_reader.get_backed_up_channel_ids()}
+                resume_channels = [c for c in d_channels if str(c.id) in backed_up] or d_channels
+                # All backed-up threads incl. forum posts and archived ones (an unmigrated one only bounds
+                # the resume point by its own ID, see waterfall_resume_point)
+                resume_threads = [t for t in getattr(self.engine.discord_reader, "threads", [])
+                                  if str(t.id) in backed_up]
+            else:
+                resume_threads = [t for t in await self.engine.discord_reader.get_active_threads()
+                                  if str(getattr(t, 'parent_id', None)) in active_channel_ids]
+            min_last_id = state.waterfall_resume_point(resume_channels, resume_threads)
+
             modal.write(f"\n[bold cyan]Waterfall Migration Resume Point:[/bold cyan]")
             if min_last_id is not None:
                 modal.write(f"Minimum unmigrated message ID found: [green]{min_last_id}[/green]")

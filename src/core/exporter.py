@@ -146,7 +146,9 @@ class DiscordExporter:
                 "position": r.position,
                 "permissions": r.permissions.value,
                 "hoist": 1 if r.hoist else 0,
-                "mentionable": 1 if r.mentionable else 0
+                "mentionable": 1 if r.mentionable else 0,
+                "managed": 1 if r.managed else 0,
+                "bot_id": str(r.tags.bot_id) if r.tags and r.tags.bot_id else None,
             })
         
         if self.db:

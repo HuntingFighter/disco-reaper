@@ -315,3 +315,26 @@ async def test_delete_channel_reports_already_deleted(writer):
     assert await writer.delete_channel("6") is False
     with pytest.raises(HTTPException):
         await writer.delete_channel("7")
+
+
+@pytest.mark.asyncio
+async def test_delete_all_stickers_uses_working_route(writer):
+    """fluxer.py's delete_guild_sticker raises KeyError ('{stickers_id}' path); the writer sends the route itself."""
+    writer.client.get_guild_emojis = AsyncMock(return_value=[])
+    writer.client.get_guild_stickers = AsyncMock(return_value=[{"id": "77", "name": "s"}])
+    writer.client.delete_guild_sticker = AsyncMock(side_effect=KeyError("stickers_id"))
+    writer.client.request = AsyncMock(return_value=None)
+
+    assert await writer.delete_all_emojis_and_stickers() == {"emojis": 0, "stickers": 1}
+    assert call(writer)[:2] == ("DELETE", f"{API}/guilds/1/stickers/77")
+
+
+@pytest.mark.asyncio
+async def test_remove_logo_sends_null_icon(writer):
+    """fluxer.py's modify_guild drops icon=None (the PATCH was empty and the logo stayed)."""
+    writer.client.get_guild = AsyncMock(return_value={"icon": "abc", "banner": None})
+    writer.client.request = AsyncMock(return_value={})
+
+    assert await writer.remove_community_logo_and_banner() == {"icon": "REMOVED", "banner": "SKIP"}
+    method, url, kwargs = call(writer)
+    assert (method, url, kwargs["json"]) == ("PATCH", f"{API}/guilds/1", {"icon": None})

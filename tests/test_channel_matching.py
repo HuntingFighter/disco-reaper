@@ -117,3 +117,29 @@ async def test_ui_auto_matching_keeps_thread_mappings(state):
     assert _target_of(state, "13") is None     # deleted target dropped
     assert _target_of(state, "14") == "502"    # matched by name
     assert state.get_channel_record("14")["name"] == "new"
+
+
+def test_name_matching_respects_channel_type(state):
+    """F15: a voice channel never takes a text channel of the same name (and vice versa)."""
+    voice = NS(id=21, name="General", type=NS(value=2), category_id=None)
+    text = _ch(22, "general")
+    targets = [_target("501", "general", type=0), _target("502", "General", type=2)]
+
+    match_channels(state, [voice, text], targets)
+
+    assert (_target_of(state, "21"), _target_of(state, "22")) == ("502", "501")
+
+
+def test_name_matching_leaves_voice_unmatched_without_voice_target(state):
+    voice = NS(id=21, name="General", type=NS(value=2), category_id=None)
+
+    assert match_channels(state, [voice], [_target("501", "general", type=0)]) == (0, 0)
+    assert _target_of(state, "21") is None
+
+
+def test_name_matching_accepts_types_clone_converts():
+    """Clone creates stage/media channels as text, so those still match a text target; unknown types never block."""
+    from src.core.channel_matching import types_compatible
+    assert types_compatible(13, 0) and types_compatible(16, 0) and types_compatible(16, 15)
+    assert types_compatible(5, 0) and types_compatible(0, None) and types_compatible("TextChannel", 2)
+    assert not types_compatible(0, 2) and not types_compatible(2, 0) and not types_compatible(15, 0)

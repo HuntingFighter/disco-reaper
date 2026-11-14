@@ -176,3 +176,54 @@ def test_save_channels_and_threads_accept_partial_rows(tmp_path):
     db.save_threads([{"id": "11", "name": "t", "type": 11, "parent_id": "10"}])
     assert db.get_all_channels()[0]["flags"] is None
     assert db.get_all_threads()[0]["owner_id"] is None
+
+
+def test_backup_threads_know_their_newest_message(tmp_path):
+    """BackupThread.last_message_id mirrors discord.Thread.last_message_id (used to resume finished threads)."""
+    db = BackupDatabase(tmp_path / "backup.db")
+    db.save_threads([{"id": "11", "name": "t", "type": 11, "parent_id": "10"},
+                     {"id": "12", "name": "empty", "type": 11, "parent_id": "10"}])
+    db.save_messages_batch([{"id": i, "channel_id": 11, "author_id": 1, "content": "x", "timestamp": "2026-01-01",
+                             "type": 0, "custom_display_name": None, "custom_avatar_url": None,
+                             "message_reference": None, "is_pinned": 0, "extra_data": None} for i in (100, 105, 103)])
+    reader = BackupReader(tmp_path)
+    reader.db = db
+    threads = {t.id: t for t in reader.threads}
+    assert threads[11].last_message_id == 105
+    assert threads[12].last_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_backup_thread_messages_have_their_thread_as_channel(tmp_path):
+    """F17: like discord.py, a thread message's channel is the thread (the waterfall skipped messages without one)."""
+    db = BackupDatabase(tmp_path / "backup.db")
+    db.save_threads([{"id": "11", "name": "t", "type": 11, "parent_id": "10"}])
+    db.save_messages_batch([{"id": 100, "channel_id": 11, "author_id": 1, "content": "x", "timestamp": "2026-01-01",
+                             "type": 0, "custom_display_name": None, "custom_avatar_url": None,
+                             "message_reference": None, "is_pinned": 0, "extra_data": None}])
+    reader = BackupReader(tmp_path)
+    reader.db = db
+
+    msg = await reader.get_message(11, 100)
+
+    assert msg.channel is not None and msg.channel.id == 11 and msg.channel.parent_id == 10
+
+
+def test_backup_roles_keep_bot_role_info_and_old_backups_migrate(tmp_path):
+    """F25: roles.managed / roles.bot_id are added to existing backups; old rows read as regular roles."""
+    path = tmp_path / "backup.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE roles (id INTEGER PRIMARY KEY, name TEXT, color INTEGER, position INTEGER, "
+                "permissions INTEGER, hoist INTEGER, mentionable INTEGER)")
+    old.execute("INSERT INTO roles VALUES (5, 'Old', 0, 1, 0, 0, 0)")
+    old.commit(); old.close()
+
+    db = BackupDatabase(path)
+    db.save_roles([{"id": "6", "name": "Reaper", "color": 0, "position": 2, "permissions": 8, "hoist": 0,
+                    "mentionable": 0, "managed": 1, "bot_id": "99"}])
+    from src.core.backup_reader import BackupRole
+    roles = {r["name"]: BackupRole(r) for r in db.get_all_roles()}
+
+    assert roles["Reaper"].is_bot_managed() and roles["Reaper"].managed
+    assert not roles["Old"].is_bot_managed() and not roles["Old"].managed
+    assert BackupRole(None).is_bot_managed() is False

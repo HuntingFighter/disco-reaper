@@ -6,12 +6,18 @@ from src.core.base import MigrationContext
 
 logger = logging.getLogger(__name__)
 
+def _is_bot_role(role) -> bool:
+    """A bot's own managed role (e.g. DiscoReaper's): the bot isn't on Fluxer, so the role isn't migrated or matched."""
+    check = getattr(role, "is_bot_managed", None)
+    return callable(check) and check() is True
+
+
 async def sync_roles_state(context: MigrationContext):
     """
     Scans Fluxer for roles matching Discord names and updates state file mappings.
     """
     logger.info("Synchronizing role mappings with Fluxer...")
-    discord_roles = await context.discord_reader.get_roles()
+    discord_roles = [r for r in await context.discord_reader.get_roles() if not _is_bot_role(r)]
     fluxer_roles = await context.fluxer_writer.client.get_guild_roles(context.config.fluxer_server_id)
     
     # Build name -> id maps and ID sets for Fluxer for fast lookup
@@ -133,6 +139,10 @@ async def migrate_roles(context: MigrationContext, progress_callback: Callable[[
     """Copies roles and their baseline permissions. Returns a list of cloned role names."""
     # Sort roles by position to respect Discord hierarchy
     roles = sorted(await context.discord_reader.get_roles(), key=lambda r: r.position, reverse=True)
+    skipped = [r.name for r in roles if _is_bot_role(r)]
+    if skipped:
+        logger.info(f"Skipping bot roles (not migrated): {', '.join(skipped)}")
+    roles = [r for r in roles if not _is_bot_role(r)]
 
     if not force:
         roles = [r for r in roles if not context.state.get_fluxer_role_id(str(r.id))]

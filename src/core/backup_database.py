@@ -26,6 +26,10 @@ ADDED_COLUMNS = {
         "invitable": "INTEGER",
         "flags": "INTEGER",
     },
+    "roles": {
+        "managed": "INTEGER",
+        "bot_id": "INTEGER",  # set for a bot's own managed role (discord.RoleTags.bot_id)
+    },
 }
 CHANNEL_COLUMNS = ("id", "name", "type", "position", "category_id", "topic", "nsfw", "bitrate", "slowmode_delay",
                    *ADDED_COLUMNS["channels"])
@@ -436,13 +440,15 @@ class BackupDatabase:
                     "position": r["position"],
                     "permissions": str(r["permissions"]),
                     "hoist": 1 if r["hoist"] else 0,
-                    "mentionable": 1 if r["mentionable"] else 0
+                    "mentionable": 1 if r["mentionable"] else 0,
+                    "managed": 1 if r.get("managed") else 0,
+                    "bot_id": parse_snowflake(r.get("bot_id")) or None,
                 }
                 for r in roles
             ]
             self._conn.executemany("""
-                INSERT OR REPLACE INTO roles (id, name, color, position, permissions, hoist, mentionable)
-                VALUES (:id, :name, :color, :position, :permissions, :hoist, :mentionable)
+                INSERT OR REPLACE INTO roles (id, name, color, position, permissions, hoist, mentionable, managed, bot_id)
+                VALUES (:id, :name, :color, :position, :permissions, :hoist, :mentionable, :managed, :bot_id)
             """, formatted)
             self._conn.commit()
 
@@ -611,6 +617,12 @@ class BackupDatabase:
         with self._lock:
             row = self._conn.execute("SELECT id FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT 1", (parse_snowflake(channel_id),)).fetchone()
             return row["id"] if row else None
+
+    def get_last_message_ids(self) -> Dict[int, int]:
+        """Newest stored message ID per channel/thread, in one query."""
+        with self._lock:
+            rows = self._conn.execute("SELECT channel_id, MAX(id) AS last_id FROM messages GROUP BY channel_id").fetchall()
+            return {r["channel_id"]: r["last_id"] for r in rows}
 
     def get_media_by_hash(self, file_hash: str) -> Optional[Dict[str, Any]]:
         with self._lock:

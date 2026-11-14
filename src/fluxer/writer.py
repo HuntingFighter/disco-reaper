@@ -850,8 +850,11 @@ class FluxerWriter:
         # 2. Remove icon if set
         if has_icon:
             try:
+                # fluxer.py's modify_guild drops icon=None (only bytes are sent), so null is sent directly
                 await self._retry_on_rate_limit(
-                    lambda: self.client.modify_guild(guild_id=self.community_id, icon=None), "remove community icon"
+                    lambda: self.client.request(self._route("PATCH", "/guilds/{guild_id}", guild_id=self.community_id),
+                                                json={"icon": None}),
+                    "remove community icon"
                 )
             except Exception as e:
                 print(f"Failed to remove community icon: {e}")
@@ -1059,8 +1062,12 @@ class FluxerWriter:
             sticker_total = len(stickers)
             for sticker in stickers:
                 try:
+                    # fluxer.py's delete_guild_sticker formats "{stickers_id}" with sticker_id= (KeyError), so the
+                    # route is sent directly
                     await self._retry_on_rate_limit(
-                        lambda: self.client.delete_guild_sticker(self.community_id, sticker["id"]), f"delete sticker {sticker['id']}"
+                        lambda: self.client.request(self._route("DELETE", "/guilds/{guild_id}/stickers/{sticker_id}",
+                                                                guild_id=self.community_id, sticker_id=sticker["id"])),
+                        f"delete sticker {sticker['id']}"
                     )
                     sticker_deleted += 1
                     if progress_callback:

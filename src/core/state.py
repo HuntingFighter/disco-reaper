@@ -326,6 +326,41 @@ class MigrationState:
         return None
         
 
+    def waterfall_resume_point(self, channels, threads) -> int | None:
+        """
+        Waterfall resume point: the global history is read after this ID; each channel/thread still skips
+        what it already migrated. Returns None if nothing was migrated yet (start from the beginning).
+        - channels: mapped ones, by their progress (channel_tracking, keyed by target channel ID). Categories
+          and forum/media channels are left out: they have no messages of their own (posts are threads).
+        - threads: progress from thread_tracking (keyed by the Discord thread ID). A thread without progress
+          (new, or skipped earlier as archived) can't have messages older than itself, so it counts from
+          its own ID - 1 instead of pulling the resume point to 0. Same bound for mapped channels.
+        """
+        if not self._ensure_db():
+            return None
+        channel_progress = self.db.get_all_channel_tracking_ids()
+        thread_progress = self.db.get_all_thread_tracking_ids()
+        points, has_progress = [], False
+
+        def add(last_id, own_id):
+            nonlocal has_progress
+            if last_id:
+                has_progress = True
+                points.append(int(last_id))
+            else:
+                points.append(max(int(own_id) - 1, 0))
+
+        for c in channels:
+            c_type = getattr(getattr(c, "type", None), "value", getattr(c, "type", None))
+            if c_type in (4, 15, 16):
+                continue
+            tid = self.get_target_channel_id(str(c.id))
+            if tid:
+                add(channel_progress.get(str(tid)), c.id)
+        for t in threads:
+            add(thread_progress.get(str(t.id)), t.id)
+        return min(points) if has_progress and points else None
+
     def get_global_min_last_message_id(self, all_mapped_ids: list[str]) -> int | None:
         """Returns the absolute minimum last_msg_id among the given list of mapped target IDs (channels and threads)."""
         if self._ensure_db():
