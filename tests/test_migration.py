@@ -136,3 +136,20 @@ async def test_migration_e2e_loop(reaper_config, test_data_dir, tmp_path, platfo
         assert stats["messages"] >= 0
     
     await context.discord_reader.close()
+
+
+@pytest.mark.asyncio
+async def test_backup_mode_is_offline(tmp_path):
+    """Backup mode reads the structure from the backup too and never logs in to Discord."""
+    from src.core.backup_reader import BackupReader
+    config = AppConfig(discord_bot_token="invalid", discord_server_id="123", fluxer_bot_token="x", fluxer_server_id="1")
+    context = MigrationContext(config, target_platform="fluxer", source_mode="backup", base_dir=str(tmp_path))
+    assert isinstance(context.discord_reader, BackupReader)
+    assert context.sync_reader is context.discord_reader
+
+    context.discord_reader.start = AsyncMock()
+    context.writer.start = AsyncMock()
+    with patch("src.core.discord_reader.DiscordReader.start", new_callable=AsyncMock) as live_start:
+        await context.start_connections()
+    live_start.assert_not_called()
+    context.discord_reader.start.assert_awaited_once()
