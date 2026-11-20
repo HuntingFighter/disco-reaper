@@ -26,6 +26,8 @@ class DiscordReader:
     CHANNEL_TYPE_THREAD_PUBLIC = discord.ChannelType.public_thread
     CHANNEL_TYPE_THREAD_PRIVATE = discord.ChannelType.private_thread
     CHANNEL_TYPE_THREAD_ANNOUNCEMENT = discord.ChannelType.news_thread
+    # Channel types that are never read or migrated (raw Discord type values)
+    SKIPPED_CHANNEL_TYPES = frozenset({20})
 
     @staticmethod
     def find_item(iterable, **attrs):
@@ -186,10 +188,34 @@ class DiscordReader:
         """Downloads an asset (icon, banner) into memory."""
         return await asset.read()
 
+    async def _fetch_guild_channels(self) -> list:
+        """
+        guild.fetch_channels() without the channel types in SKIPPED_CHANNEL_TYPES. discord.py raises
+        InvalidData for the whole list when it meets an unknown type (e.g. 20), so in that case the raw
+        channel list is fetched and the skipped types are dropped before conversion.
+        """
+        try:
+            channels = await self.guild.fetch_channels()
+        except discord.InvalidData:
+            from discord.channel import _guild_channel_factory
+            state = self.guild._state
+            data = await state.http.get_all_guild_channels(self.guild.id)
+            channels = []
+            for d in data:
+                if int(d.get("type", 0)) in self.SKIPPED_CHANNEL_TYPES:
+                    logger.info(f"Skipping channel {d.get('name')} ({d.get('id')}) of type {d.get('type')}")
+                    continue
+                factory, _ = _guild_channel_factory(d["type"])
+                if factory is None:
+                    raise
+                channels.append(factory(guild=self.guild, state=state, data=d))
+            return channels
+        return [c for c in channels if getattr(c.type, "value", c.type) not in self.SKIPPED_CHANNEL_TYPES]
+
     async def get_categories(self):
         if not self.guild:
             return []
-        categories = await self.guild.fetch_channels()
+        categories = await self._fetch_guild_channels()
         return [c for c in categories if isinstance(c, discord.CategoryChannel)]
 
     async def get_roles(self):
@@ -251,7 +277,7 @@ class DiscordReader:
         if not self.guild:
             return []
         
-        channels = await self.guild.fetch_channels()
+        channels = await self._fetch_guild_channels()
         all_channels = [c for c in channels if not isinstance(c, discord.CategoryChannel)]
         
         if category_id:
@@ -301,7 +327,7 @@ class DiscordReader:
         """Async stub for discord.Guild.fetch_channels."""
         if not self.guild:
             return []
-        return await self.guild.fetch_channels()
+        return await self._fetch_guild_channels()
 
     async def get_channel(self, channel_id: int):
         """Returns a channel object."""

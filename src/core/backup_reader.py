@@ -1058,6 +1058,8 @@ class BackupReader:
     CHANNEL_TYPE_THREAD_PUBLIC = ChannelType.public_thread
     CHANNEL_TYPE_THREAD_PRIVATE = ChannelType.private_thread
     CHANNEL_TYPE_THREAD_ANNOUNCEMENT = ChannelType.news_thread
+    # Channel types that are never read or migrated (raw Discord type values)
+    SKIPPED_CHANNEL_TYPES = frozenset({20})
 
     @staticmethod
     def find_item(iterable, **attrs):
@@ -1146,6 +1148,9 @@ class BackupReader:
         rows = self.db.get_all_channels()
         
         for data in rows:
+            if parse_snowflake(data.get("type")) in self.SKIPPED_CHANNEL_TYPES:
+                logger.info(f"[Backup] Skipping channel {data.get('name')} ({data.get('id')}) of type {data.get('type')}")
+                continue
             if data["type"] == 4: # Category
                 self._categories.append(BackupCategory(data))
             else:
